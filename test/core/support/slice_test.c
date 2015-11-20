@@ -35,10 +35,11 @@
 
 #include <string.h>
 
+#include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 #include "test/core/util/test_config.h"
 
-#define LOG_TEST_NAME() gpr_log(GPR_INFO, "%s", __FUNCTION__);
+#define LOG_TEST_NAME(x) gpr_log(GPR_INFO, "%s", x);
 
 static void test_slice_malloc_returns_something_sensible(void) {
   /* Calls gpr_slice_create for various lengths and verifies the internals for
@@ -47,7 +48,7 @@ static void test_slice_malloc_returns_something_sensible(void) {
   size_t i;
   gpr_slice slice;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_slice_malloc_returns_something_sensible");
 
   for (length = 0; length <= 1024; length++) {
     slice = gpr_slice_malloc(length);
@@ -65,7 +66,7 @@ static void test_slice_malloc_returns_something_sensible(void) {
     }
     /* We must be able to write to every byte of the data */
     for (i = 0; i < length; i++) {
-      GPR_SLICE_START_PTR(slice)[i] = (char)i;
+      GPR_SLICE_START_PTR(slice)[i] = (gpr_uint8)i;
     }
     /* And finally we must succeed in destroying the slice */
     gpr_slice_unref(slice);
@@ -108,14 +109,14 @@ static void test_slice_sub_works(unsigned length) {
   gpr_slice sub;
   unsigned i, j, k;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_slice_sub_works");
   gpr_log(GPR_INFO, "length=%d", length);
 
   /* Create a slice in which each byte is equal to the distance from it to the
      beginning of the slice. */
   slice = gpr_slice_malloc(length);
   for (i = 0; i < length; i++) {
-    GPR_SLICE_START_PTR(slice)[i] = i;
+    GPR_SLICE_START_PTR(slice)[i] = (gpr_uint8)i;
   }
 
   /* Ensure that for all subsets length is correct and that we start on the
@@ -142,19 +143,19 @@ static void check_head_tail(gpr_slice slice, gpr_slice head, gpr_slice tail) {
                          GPR_SLICE_START_PTR(tail), GPR_SLICE_LENGTH(tail)));
 }
 
-static void test_slice_split_head_works(int length) {
+static void test_slice_split_head_works(size_t length) {
   gpr_slice slice;
   gpr_slice head, tail;
-  int i;
+  size_t i;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_slice_split_head_works");
   gpr_log(GPR_INFO, "length=%d", length);
 
   /* Create a slice in which each byte is equal to the distance from it to the
      beginning of the slice. */
   slice = gpr_slice_malloc(length);
   for (i = 0; i < length; i++) {
-    GPR_SLICE_START_PTR(slice)[i] = i;
+    GPR_SLICE_START_PTR(slice)[i] = (gpr_uint8)i;
   }
 
   /* Ensure that for all subsets length is correct and that we start on the
@@ -170,19 +171,19 @@ static void test_slice_split_head_works(int length) {
   gpr_slice_unref(slice);
 }
 
-static void test_slice_split_tail_works(int length) {
+static void test_slice_split_tail_works(size_t length) {
   gpr_slice slice;
   gpr_slice head, tail;
-  int i;
+  size_t i;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_slice_split_tail_works");
   gpr_log(GPR_INFO, "length=%d", length);
 
   /* Create a slice in which each byte is equal to the distance from it to the
      beginning of the slice. */
   slice = gpr_slice_malloc(length);
   for (i = 0; i < length; i++) {
-    GPR_SLICE_START_PTR(slice)[i] = i;
+    GPR_SLICE_START_PTR(slice)[i] = (gpr_uint8)i;
   }
 
   /* Ensure that for all subsets length is correct and that we start on the
@@ -202,7 +203,7 @@ static void test_slice_from_copied_string_works(void) {
   static const char *text = "HELLO WORLD!";
   gpr_slice slice;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_slice_from_copied_string_works");
 
   slice = gpr_slice_from_copied_string(text);
   GPR_ASSERT(strlen(text) == GPR_SLICE_LENGTH(slice));

@@ -76,7 +76,7 @@ static size_t bucket_for_unchecked(gpr_histogram *h, double x) {
 
 /* bounds checked version of the above */
 static size_t bucket_for(gpr_histogram *h, double x) {
-  size_t bucket = bucket_for_unchecked(h, GPR_CLAMP(x, 0, h->max_possible));
+  size_t bucket = bucket_for_unchecked(h, GPR_CLAMP(x, 1.0, h->max_possible));
   GPR_ASSERT(bucket < h->num_buckets);
   return bucket;
 }
@@ -125,26 +125,36 @@ void gpr_histogram_add(gpr_histogram *h, double x) {
   h->buckets[bucket_for(h, x)]++;
 }
 
-int gpr_histogram_merge(gpr_histogram *dst, gpr_histogram *src) {
-  size_t i;
+int gpr_histogram_merge(gpr_histogram *dst, const gpr_histogram *src) {
   if ((dst->num_buckets != src->num_buckets) ||
       (dst->multiplier != src->multiplier)) {
     /* Fail because these histograms don't match */
     return 0;
   }
-  dst->sum += src->sum;
-  dst->sum_of_squares += src->sum_of_squares;
-  dst->count += src->count;
-  if (src->min_seen < dst->min_seen) {
-    dst->min_seen = src->min_seen;
+  gpr_histogram_merge_contents(dst, src->buckets, src->num_buckets,
+                               src->min_seen, src->max_seen, src->sum,
+                               src->sum_of_squares, src->count);
+  return 1;
+}
+
+void gpr_histogram_merge_contents(gpr_histogram *dst, const gpr_uint32 *data,
+                                  size_t data_count, double min_seen,
+                                  double max_seen, double sum,
+                                  double sum_of_squares, double count) {
+  size_t i;
+  GPR_ASSERT(dst->num_buckets == data_count);
+  dst->sum += sum;
+  dst->sum_of_squares += sum_of_squares;
+  dst->count += count;
+  if (min_seen < dst->min_seen) {
+    dst->min_seen = min_seen;
   }
-  if (src->max_seen > dst->max_seen) {
-    dst->max_seen = src->max_seen;
+  if (max_seen > dst->max_seen) {
+    dst->max_seen = max_seen;
   }
   for (i = 0; i < dst->num_buckets; i++) {
-    dst->buckets[i] += src->buckets[i];
+    dst->buckets[i] += data[i];
   }
-  return 1;
 }
 
 static double threshold_for_count_below(gpr_histogram *h, double count_below) {
@@ -154,7 +164,9 @@ static double threshold_for_count_below(gpr_histogram *h, double count_below) {
   size_t lower_idx;
   size_t upper_idx;
 
-  GPR_ASSERT(h->count >= 1);
+  if (h->count == 0) {
+    return 0.0;
+  }
 
   if (count_below <= 0) {
     return h->min_seen;
@@ -179,15 +191,18 @@ static double threshold_for_count_below(gpr_histogram *h, double count_below) {
         break;
       }
     }
-    return (bucket_start(h, lower_idx) + bucket_start(h, upper_idx)) / 2.0;
+    return (bucket_start(h, (double)lower_idx) +
+            bucket_start(h, (double)upper_idx)) /
+           2.0;
   } else {
     /* treat values as uniform throughout the bucket, and find where this value
        should lie */
-    lower_bound = bucket_start(h, lower_idx);
-    upper_bound = bucket_start(h, lower_idx + 1);
-    return GPR_CLAMP(upper_bound - (upper_bound - lower_bound) *
-                                       (count_so_far - count_below) /
-                                       h->buckets[lower_idx],
+    lower_bound = bucket_start(h, (double)lower_idx);
+    upper_bound = bucket_start(h, (double)(lower_idx + 1));
+    return GPR_CLAMP(upper_bound -
+                         (upper_bound - lower_bound) *
+                             (count_so_far - count_below) /
+                             h->buckets[lower_idx],
                      h->min_seen, h->max_seen);
   }
 }
@@ -197,7 +212,7 @@ double gpr_histogram_percentile(gpr_histogram *h, double percentile) {
 }
 
 double gpr_histogram_mean(gpr_histogram *h) {
-  GPR_ASSERT(h->count);
+  GPR_ASSERT(h->count != 0);
   return h->sum / h->count;
 }
 
@@ -221,4 +236,9 @@ double gpr_histogram_sum(gpr_histogram *h) { return h->sum; }
 
 double gpr_histogram_sum_of_squares(gpr_histogram *h) {
   return h->sum_of_squares;
+}
+
+const gpr_uint32 *gpr_histogram_get_contents(gpr_histogram *h, size_t *size) {
+  *size = h->num_buckets;
+  return h->buckets;
 }

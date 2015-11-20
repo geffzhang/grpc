@@ -31,13 +31,11 @@
  *
  */
 
-#ifndef __GRPC_SUPPORT_ATM_WIN32_H__
-#define __GRPC_SUPPORT_ATM_WIN32_H__
+#ifndef GRPC_SUPPORT_ATM_WIN32_H
+#define GRPC_SUPPORT_ATM_WIN32_H
 
 /* Win32 variant of atm_platform.h */
 #include <grpc/support/port_platform.h>
-
-#include <windows.h>
 
 typedef gpr_intptr gpr_atm;
 
@@ -49,34 +47,50 @@ static __inline gpr_atm gpr_atm_acq_load(const gpr_atm *p) {
   return result;
 }
 
+static __inline gpr_atm gpr_atm_no_barrier_load(const gpr_atm *p) {
+  /* TODO(dklempner): Can we implement something better here? */
+  return gpr_atm_acq_load(p);
+}
+
 static __inline void gpr_atm_rel_store(gpr_atm *p, gpr_atm value) {
   gpr_atm_full_barrier();
   *p = value;
+}
+
+static __inline void gpr_atm_no_barrier_store(gpr_atm *p, gpr_atm value) {
+  /* TODO(ctiller): Can we implement something better here? */
+  gpr_atm_rel_store(p, value);
 }
 
 static __inline int gpr_atm_no_barrier_cas(gpr_atm *p, gpr_atm o, gpr_atm n) {
 /* InterlockedCompareExchangePointerNoFence() not available on vista or
    windows7 */
 #ifdef GPR_ARCH_64
-  return o == (gpr_atm)InterlockedCompareExchangeAcquire64(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeAcquire64(
+                  (volatile LONGLONG *)p, (LONGLONG)n, (LONGLONG)o);
 #else
-  return o == (gpr_atm)InterlockedCompareExchangeAcquire(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeAcquire((volatile LONG *)p,
+                                                         (LONG)n, (LONG)o);
 #endif
 }
 
 static __inline int gpr_atm_acq_cas(gpr_atm *p, gpr_atm o, gpr_atm n) {
 #ifdef GPR_ARCH_64
-  return o == (gpr_atm)InterlockedCompareExchangeAcquire64(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeAcquire64(
+                  (volatile LONGLONG *)p, (LONGLONG)n, (LONGLONG)o);
 #else
-  return o == (gpr_atm)InterlockedCompareExchangeAcquire(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeAcquire((volatile LONG *)p,
+                                                         (LONG)n, (LONG)o);
 #endif
 }
 
 static __inline int gpr_atm_rel_cas(gpr_atm *p, gpr_atm o, gpr_atm n) {
 #ifdef GPR_ARCH_64
-  return o == (gpr_atm)InterlockedCompareExchangeRelease64(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeRelease64(
+                  (volatile LONGLONG *)p, (LONGLONG)n, (LONGLONG)o);
 #else
-  return o == (gpr_atm)InterlockedCompareExchangeRelease(p, n, o);
+  return o == (gpr_atm)InterlockedCompareExchangeRelease((volatile LONG *)p,
+                                                         (LONG)n, (LONG)o);
 #endif
 }
 
@@ -96,13 +110,16 @@ static __inline gpr_atm gpr_atm_full_fetch_add(gpr_atm *p, gpr_atm delta) {
 #ifdef GPR_ARCH_64
   do {
     old = *p;
-  } while (old != (gpr_atm)InterlockedCompareExchange64(p, old + delta, old));
+  } while (old != (gpr_atm)InterlockedCompareExchange64((volatile LONGLONG *)p,
+                                                        (LONGLONG)old + delta,
+                                                        (LONGLONG)old));
 #else
   do {
     old = *p;
-  } while (old != (gpr_atm)InterlockedCompareExchange(p, old + delta, old));
+  } while (old != (gpr_atm)InterlockedCompareExchange(
+                      (volatile LONG *)p, (LONG)old + delta, (LONG)old));
 #endif
   return old;
 }
 
-#endif /* __GRPC_SUPPORT_ATM_WIN32_H__ */
+#endif /* GRPC_SUPPORT_ATM_WIN32_H */

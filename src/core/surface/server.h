@@ -31,33 +31,37 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_SURFACE_SERVER_H__
-#define __GRPC_INTERNAL_SURFACE_SERVER_H__
+#ifndef GRPC_INTERNAL_CORE_SURFACE_SERVER_H
+#define GRPC_INTERNAL_CORE_SURFACE_SERVER_H
 
 #include "src/core/channel/channel_stack.h"
 #include <grpc/grpc.h>
 #include "src/core/transport/transport.h"
 
 /* Create a server */
-grpc_server *grpc_server_create_from_filters(grpc_completion_queue *cq,
-                                             grpc_channel_filter **filters,
-                                             size_t filter_count,
-                                             const grpc_channel_args *args);
+grpc_server *grpc_server_create_from_filters(
+    const grpc_channel_filter **filters, size_t filter_count,
+    const grpc_channel_args *args);
 
 /* Add a listener to the server: when the server starts, it will call start,
    and when it shuts down, it will call destroy */
-void grpc_server_add_listener(grpc_server *server, void *listener,
-                              void (*start)(grpc_server *server, void *arg,
-                                            grpc_pollset **pollsets, size_t npollsets),
-                              void (*destroy)(grpc_server *server, void *arg));
+void grpc_server_add_listener(
+    grpc_exec_ctx *exec_ctx, grpc_server *server, void *listener,
+    void (*start)(grpc_exec_ctx *exec_ctx, grpc_server *server, void *arg,
+                  grpc_pollset **pollsets, size_t npollsets),
+    void (*destroy)(grpc_exec_ctx *exec_ctx, grpc_server *server, void *arg,
+                    grpc_closure *on_done));
 
 /* Setup a transport - creates a channel stack, binds the transport to the
    server */
-grpc_transport_setup_result grpc_server_setup_transport(
-    grpc_server *server, grpc_transport *transport,
-    grpc_channel_filter const **extra_filters, size_t num_extra_filters,
-    grpc_mdctx *mdctx);
+void grpc_server_setup_transport(grpc_exec_ctx *exec_ctx, grpc_server *server,
+                                 grpc_transport *transport,
+                                 grpc_channel_filter const **extra_filters,
+                                 size_t num_extra_filters, grpc_mdctx *mdctx,
+                                 const grpc_channel_args *args);
 
 const grpc_channel_args *grpc_server_get_channel_args(grpc_server *server);
 
-#endif /* __GRPC_INTERNAL_SURFACE_SERVER_H__ */
+int grpc_server_has_open_connections(grpc_server *server);
+
+#endif /* GRPC_INTERNAL_CORE_SURFACE_SERVER_H */

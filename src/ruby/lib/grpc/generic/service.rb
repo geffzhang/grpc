@@ -30,24 +30,6 @@
 require 'grpc/generic/client_stub'
 require 'grpc/generic/rpc_desc'
 
-# Extend String to add a method underscore
-class String
-  # creates a new string that is the underscore separate version of this one.
-  #
-  # E.g,
-  # PrintHTML -> print_html
-  # AMethod -> a_method
-  # AnRpc -> an_rpc
-  def underscore
-    word = dup
-    word.gsub!(/([A-Z]+)([A-Z][a-z])/, '\1_\2')
-    word.gsub!(/([a-z\d])([A-Z])/, '\1_\2')
-    word.tr!('-', '_')
-    word.downcase!
-    word
-  end
-end
-
 # GRPC contains the General RPC module.
 module GRPC
   # Provides behaviour used to implement schema-derived service classes.
@@ -55,6 +37,22 @@ module GRPC
   # Is intended to be used to support both client and server
   # IDL-schema-derived servers.
   module GenericService
+    # creates a new string that is the underscore separate version of s.
+    #
+    # E.g,
+    # PrintHTML -> print_html
+    # AMethod -> a_method
+    # AnRpc -> an_rpc
+    #
+    # @param s [String] the string to be converted.
+    def self.underscore(s)
+      s.gsub!(/([A-Z]+)([A-Z][a-z])/, '\1_\2')
+      s.gsub!(/([a-z\d])([A-Z])/, '\1_\2')
+      s.tr!('-', '_')
+      s.downcase!
+      s
+    end
+
     # Used to indicate that a name has already been specified
     class DuplicateRpcName < StandardError
       def initialize(name)
@@ -171,30 +169,29 @@ module GRPC
           # Used define_method to add a method for each rpc_desc.  Each method
           # calls the base class method for the given descriptor.
           descs.each_pair do |name, desc|
-            mth_name = name.to_s.underscore.to_sym
+            mth_name = GenericService.underscore(name.to_s).to_sym
             marshal = desc.marshal_proc
             unmarshal = desc.unmarshal_proc(:output)
             route = "/#{route_prefix}/#{name}"
             if desc.request_response?
-              define_method(mth_name) do |req, deadline = nil|
-                logger.debug("calling #{@host}:#{route}")
-                request_response(route, req, marshal, unmarshal, deadline)
+              define_method(mth_name) do |req, **kw|
+                GRPC.logger.debug("calling #{@host}:#{route}")
+                request_response(route, req, marshal, unmarshal, **kw)
               end
             elsif desc.client_streamer?
-              define_method(mth_name) do |reqs, deadline = nil|
-                logger.debug("calling #{@host}:#{route}")
-                client_streamer(route, reqs, marshal, unmarshal, deadline)
+              define_method(mth_name) do |reqs, **kw|
+                GRPC.logger.debug("calling #{@host}:#{route}")
+                client_streamer(route, reqs, marshal, unmarshal, **kw)
               end
             elsif desc.server_streamer?
-              define_method(mth_name) do |req, deadline = nil, &blk|
-                logger.debug("calling #{@host}:#{route}")
-                server_streamer(route, req, marshal, unmarshal, deadline,
-                                &blk)
+              define_method(mth_name) do |req, **kw, &blk|
+                GRPC.logger.debug("calling #{@host}:#{route}")
+                server_streamer(route, req, marshal, unmarshal, **kw, &blk)
               end
             else  # is a bidi_stream
-              define_method(mth_name) do |reqs, deadline = nil, &blk|
-                logger.debug("calling #{@host}:#{route}")
-                bidi_streamer(route, reqs, marshal, unmarshal, deadline, &blk)
+              define_method(mth_name) do |reqs, **kw, &blk|
+                GRPC.logger.debug("calling #{@host}:#{route}")
+                bidi_streamer(route, reqs, marshal, unmarshal, **kw, &blk)
               end
             end
           end
@@ -206,7 +203,7 @@ module GRPC
       # implemented.
       def assert_rpc_descs_have_methods
         rpc_descs.each_pair do |m, spec|
-          mth_name = m.to_s.underscore.to_sym
+          mth_name = GenericService.underscore(m.to_s).to_sym
           unless instance_methods.include?(mth_name)
             fail "#{self} does not provide instance method '#{mth_name}'"
           end
@@ -217,8 +214,8 @@ module GRPC
 
     def self.included(o)
       o.extend(Dsl)
-      # Update to the use the service name including module. Proivde a default
-      # that can be nil e,g. when modules are declared dynamically.
+      # Update to the use the service name including module. Provide a default
+      # that can be nil e.g. when modules are declared dynamically.
       return unless o.service_name.nil?
       if o.name.nil?
         o.service_name = 'GenericService'

@@ -31,87 +31,59 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_SURFACE_COMPLETION_QUEUE_H__
-#define __GRPC_INTERNAL_SURFACE_COMPLETION_QUEUE_H__
+#ifndef GRPC_INTERNAL_CORE_SURFACE_COMPLETION_QUEUE_H
+#define GRPC_INTERNAL_CORE_SURFACE_COMPLETION_QUEUE_H
 
-/* Internal API for completion channels */
+/* Internal API for completion queues */
 
 #include "src/core/iomgr/pollset.h"
 #include <grpc/grpc.h>
 
-/* A finish func is executed whenever the event consumer calls
-   grpc_event_finish */
-typedef void (*grpc_event_finish_func)(void *user_data, grpc_op_error error);
+typedef struct grpc_cq_completion {
+  /** user supplied tag */
+  void *tag;
+  /** done callback - called when this queue element is no longer
+      needed by the completion queue */
+  void (*done)(grpc_exec_ctx *exec_ctx, void *done_arg,
+               struct grpc_cq_completion *c);
+  void *done_arg;
+  /** next pointer; low bit is used to indicate success or not */
+  gpr_uintptr next;
+} grpc_cq_completion;
+
+#ifdef GRPC_CQ_REF_COUNT_DEBUG
+void grpc_cq_internal_ref(grpc_completion_queue *cc, const char *reason,
+                          const char *file, int line);
+void grpc_cq_internal_unref(grpc_completion_queue *cc, const char *reason,
+                            const char *file, int line);
+#define GRPC_CQ_INTERNAL_REF(cc, reason) \
+  grpc_cq_internal_ref(cc, reason, __FILE__, __LINE__)
+#define GRPC_CQ_INTERNAL_UNREF(cc, reason) \
+  grpc_cq_internal_unref(cc, reason, __FILE__, __LINE__)
+#else
+void grpc_cq_internal_ref(grpc_completion_queue *cc);
+void grpc_cq_internal_unref(grpc_completion_queue *cc);
+#define GRPC_CQ_INTERNAL_REF(cc, reason) grpc_cq_internal_ref(cc)
+#define GRPC_CQ_INTERNAL_UNREF(cc, reason) grpc_cq_internal_unref(cc)
+#endif
 
 /* Flag that an operation is beginning: the completion channel will not finish
    shutdown until a corrensponding grpc_cq_end_* call is made */
-void grpc_cq_begin_op(grpc_completion_queue *cc, grpc_call *call,
-                      grpc_completion_type type);
+void grpc_cq_begin_op(grpc_completion_queue *cc);
 
-/* grpc_cq_end_* functions pair with a grpc_cq_begin_op
-
-   grpc_cq_end_* common arguments:
-   cc        - the completion channel to queue on
-   tag       - the user supplied operation tag
-   on_finish - grpc_event_finish_func that is called during grpc_event_finish
-               can be NULL to not get a callback
-   user_data - user_data parameter to be passed to on_finish
-
-   Other parameters match the data member of grpc_event */
-
-/* Queue a GRPC_READ operation */
-void grpc_cq_end_read(grpc_completion_queue *cc, void *tag, grpc_call *call,
-                      grpc_event_finish_func on_finish, void *user_data,
-                      grpc_byte_buffer *read);
-/* Queue a GRPC_INVOKE_ACCEPTED operation */
-void grpc_cq_end_invoke_accepted(grpc_completion_queue *cc, void *tag,
-                                 grpc_call *call,
-                                 grpc_event_finish_func on_finish,
-                                 void *user_data, grpc_op_error error);
-/* Queue a GRPC_WRITE_ACCEPTED operation */
-void grpc_cq_end_write_accepted(grpc_completion_queue *cc, void *tag,
-                                grpc_call *call,
-                                grpc_event_finish_func on_finish,
-                                void *user_data, grpc_op_error error);
-/* Queue a GRPC_FINISH_ACCEPTED operation */
-void grpc_cq_end_finish_accepted(grpc_completion_queue *cc, void *tag,
-                                 grpc_call *call,
-                                 grpc_event_finish_func on_finish,
-                                 void *user_data, grpc_op_error error);
 /* Queue a GRPC_OP_COMPLETED operation */
-void grpc_cq_end_op_complete(grpc_completion_queue *cc, void *tag,
-                             grpc_call *call, grpc_event_finish_func on_finish,
-                             void *user_data, grpc_op_error error);
-/* Queue a GRPC_CLIENT_METADATA_READ operation */
-void grpc_cq_end_client_metadata_read(grpc_completion_queue *cc, void *tag,
-                                      grpc_call *call,
-                                      grpc_event_finish_func on_finish,
-                                      void *user_data, size_t count,
-                                      grpc_metadata *elements);
-
-void grpc_cq_end_finished(grpc_completion_queue *cc, void *tag, grpc_call *call,
-                          grpc_event_finish_func on_finish, void *user_data,
-                          grpc_status_code status, const char *details,
-                          grpc_metadata *metadata_elements,
-                          size_t metadata_count);
-
-void grpc_cq_end_new_rpc(grpc_completion_queue *cc, void *tag, grpc_call *call,
-                         grpc_event_finish_func on_finish, void *user_data,
-                         const char *method, const char *host,
-                         gpr_timespec deadline, size_t metadata_count,
-                         grpc_metadata *metadata_elements);
-
-void grpc_cq_end_op(grpc_completion_queue *cc, void *tag, grpc_call *call,
-                    grpc_event_finish_func on_finish, void *user_data,
-                    grpc_op_error error);
-
-void grpc_cq_end_server_shutdown(grpc_completion_queue *cc, void *tag);
-
-/* disable polling for some tests */
-void grpc_completion_queue_dont_poll_test_only(grpc_completion_queue *cc);
-
-void grpc_cq_dump_pending_ops(grpc_completion_queue *cc);
+void grpc_cq_end_op(grpc_exec_ctx *exec_ctx, grpc_completion_queue *cc,
+                    void *tag, int success,
+                    void (*done)(grpc_exec_ctx *exec_ctx, void *done_arg,
+                                 grpc_cq_completion *storage),
+                    void *done_arg, grpc_cq_completion *storage);
 
 grpc_pollset *grpc_cq_pollset(grpc_completion_queue *cc);
 
-#endif /* __GRPC_INTERNAL_SURFACE_COMPLETION_QUEUE_H__ */
+void grpc_cq_mark_server_cq(grpc_completion_queue *cc);
+int grpc_cq_is_server_cq(grpc_completion_queue *cc);
+
+void grpc_cq_global_init(void);
+void grpc_cq_global_shutdown(void);
+
+#endif /* GRPC_INTERNAL_CORE_SURFACE_COMPLETION_QUEUE_H */

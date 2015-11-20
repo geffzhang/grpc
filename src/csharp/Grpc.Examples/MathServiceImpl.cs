@@ -33,78 +33,71 @@
 
 using System;
 using System.Collections.Generic;
-using System.Reactive.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Grpc.Core;
 using Grpc.Core.Utils;
 
-namespace math
+namespace Math
 {
     /// <summary>
     /// Implementation of MathService server
     /// </summary>
-    public class MathServiceImpl : MathGrpc.IMathService
+    public class MathServiceImpl : Math.IMath
     {
-        public void Div(DivArgs request, IObserver<DivReply> responseObserver)
+        public Task<DivReply> Div(DivArgs request, ServerCallContext context)
         {
-            var response = DivInternal(request);
-            responseObserver.OnNext(response);
-            responseObserver.OnCompleted();
+            return Task.FromResult(DivInternal(request));
         }
 
-        public void Fib(FibArgs request, IObserver<Num> responseObserver)
+        public async Task Fib(FibArgs request, IServerStreamWriter<Num> responseStream, ServerCallContext context)
         {
             if (request.Limit <= 0)
             {
-                // TODO: support cancellation....
-                throw new NotImplementedException("Not implemented yet");
+                // keep streaming the sequence until cancelled.
+                IEnumerator<Num> fibEnumerator = FibInternal(long.MaxValue).GetEnumerator();
+                while (!context.CancellationToken.IsCancellationRequested && fibEnumerator.MoveNext())
+                {
+                    await responseStream.WriteAsync(fibEnumerator.Current);
+                    await Task.Delay(100);
+                }
             }
 
             if (request.Limit > 0)
             {
                 foreach (var num in FibInternal(request.Limit))
                 {
-                    responseObserver.OnNext(num);
+                    await responseStream.WriteAsync(num);
                 }
-                responseObserver.OnCompleted();
             }
         }
 
-        public IObserver<Num> Sum(IObserver<Num> responseObserver)
+        public async Task<Num> Sum(IAsyncStreamReader<Num> requestStream, ServerCallContext context)
         {
-            var recorder = new RecordingObserver<Num>();
-            Task.Factory.StartNew(() => {
-
-                List<Num> inputs = recorder.ToList().Result;
-
-                long sum = 0;
-                foreach (Num num in inputs)
-                {
-                    sum += num.Num_;
-                }
-
-                responseObserver.OnNext(Num.CreateBuilder().SetNum_(sum).Build());
-                responseObserver.OnCompleted();
+            long sum = 0;
+            await requestStream.ForEachAsync(async num =>
+            {
+                sum += num.Num_;
             });
-            return recorder;
+            return new Num { Num_ = sum };
         }
 
-        public IObserver<DivArgs> DivMany(IObserver<DivReply> responseObserver)
+        public async Task DivMany(IAsyncStreamReader<DivArgs> requestStream, IServerStreamWriter<DivReply> responseStream, ServerCallContext context)
         {
-            return new DivObserver(responseObserver);
+            await requestStream.ForEachAsync(async divArgs => await responseStream.WriteAsync(DivInternal(divArgs)));
         }
 
         static DivReply DivInternal(DivArgs args)
         {
             long quotient = args.Dividend / args.Divisor;
             long remainder = args.Dividend % args.Divisor;
-            return new DivReply.Builder { Quotient = quotient, Remainder = remainder }.Build();
+            return new DivReply { Quotient = quotient, Remainder = remainder };
         }
 
         static IEnumerable<Num> FibInternal(long n)
         {
             long a = 1;
-            yield return new Num.Builder { Num_=a }.Build();
+            yield return new Num { Num_ = a };
 
             long b = 1;
             for (long i = 0; i < n - 1; i++)
@@ -112,34 +105,8 @@ namespace math
                 long temp = a;
                 a = b;
                 b = temp + b;
-                yield return new Num.Builder { Num_=a }.Build();
+                yield return new Num { Num_ = a };
             }
-        }
-
-        private class DivObserver : IObserver<DivArgs> {
-
-            readonly IObserver<DivReply> responseObserver;
-
-            public DivObserver(IObserver<DivReply> responseObserver)
-            {
-                this.responseObserver = responseObserver;
-            }
-
-            public void OnCompleted()
-            {
-                responseObserver.OnCompleted();
-            }
-
-            public void OnError(Exception error)
-            {
-                throw new NotImplementedException();
-            }
-
-            public void OnNext(DivArgs value)
-            {
-                responseObserver.OnNext(DivInternal(value));
-            }
-        }
+        }        
     }
 }
-

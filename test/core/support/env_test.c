@@ -41,19 +41,19 @@
 #include "src/core/support/string.h"
 #include "test/core/util/test_config.h"
 
-#define LOG_TEST_NAME() gpr_log(GPR_INFO, "%s", __FUNCTION__)
+#define LOG_TEST_NAME(x) gpr_log(GPR_INFO, "%s", x)
 
 static void test_setenv_getenv(void) {
   const char *name = "FOO";
   const char *value = "BAR";
   char *retrieved_value;
 
-  LOG_TEST_NAME();
+  LOG_TEST_NAME("test_setenv_getenv");
 
   gpr_setenv(name, value);
   retrieved_value = gpr_getenv(name);
   GPR_ASSERT(retrieved_value != NULL);
-  GPR_ASSERT(!strcmp(value, retrieved_value));
+  GPR_ASSERT(strcmp(value, retrieved_value) == 0);
   gpr_free(retrieved_value);
 }
 

@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_STATISTICS_CENSUS_INTERFACE_H__
-#define __GRPC_INTERNAL_STATISTICS_CENSUS_INTERFACE_H__
+#ifndef GRPC_INTERNAL_CORE_STATISTICS_CENSUS_INTERFACE_H
+#define GRPC_INTERNAL_CORE_STATISTICS_CENSUS_INTERFACE_H
 
 #include <grpc/support/port_platform.h>
 
@@ -61,11 +61,11 @@ void census_shutdown(void);
 
    TODO(hongyu): Figure out valid characters set for service name and command
    name and document requirements here.*/
-int census_add_method_tag(census_op_id op_id, const char* method_name);
+int census_add_method_tag(census_op_id op_id, const char *method_name);
 
 /* Annotates tracing information to a specific op_id.
    Up to CENSUS_MAX_ANNOTATION_LENGTH bytes are recorded. */
-void census_tracing_print(census_op_id op_id, const char* annotation);
+void census_tracing_print(census_op_id op_id, const char *annotation);
 
 /* Starts tracing for an RPC. Returns a locally unique census_op_id */
 census_op_id census_tracing_start_op(void);
@@ -73,4 +73,4 @@ census_op_id census_tracing_start_op(void);
 /* Ends tracing. Calling this function will invalidate the input op_id. */
 void census_tracing_end_op(census_op_id op_id);
 
-#endif /* __GRPC_INTERNAL_STATISTICS_CENSUS_INTERFACE_H__ */
+#endif /* GRPC_INTERNAL_CORE_STATISTICS_CENSUS_INTERFACE_H */

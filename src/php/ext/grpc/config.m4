@@ -35,8 +35,13 @@ if test "$PHP_GRPC" != "no"; then
   PHP_ADD_LIBRARY(dl,,GRPC_SHARED_LIBADD)
   PHP_ADD_LIBRARY(dl)
 
-  PHP_ADD_LIBRARY(rt,,GRPC_SHARED_LIBADD)
-  PHP_ADD_LIBRARY(rt)
+  case $host in
+    *darwin*) ;;
+    *)
+      PHP_ADD_LIBRARY(rt,,GRPC_SHARED_LIBADD)
+      PHP_ADD_LIBRARY(rt)
+      ;;
+  esac
 
   GRPC_LIBDIR=$GRPC_DIR/${GRPC_LIB_SUBDIR-lib}
 
@@ -66,5 +71,7 @@ if test "$PHP_GRPC" != "no"; then
 
   PHP_SUBST(GRPC_SHARED_LIBADD)
 
-  PHP_NEW_EXTENSION(grpc, byte_buffer.c call.c channel.c completion_queue.c credentials.c event.c timeval.c server.c server_credentials.c php_grpc.c, $ext_shared, , -Wall -Werror -pedantic -std=c99)
+  PHP_NEW_EXTENSION(grpc, byte_buffer.c call.c call_credentials.c channel.c \
+    channel_credentials.c completion_queue.c timeval.c server.c \
+    server_credentials.c php_grpc.c, $ext_shared, , -Wall -Werror -std=c11)
 fi

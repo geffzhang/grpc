@@ -31,16 +31,18 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_IOMGR_RESOLVE_ADDRESS_H__
-#define __GRPC_INTERNAL_IOMGR_RESOLVE_ADDRESS_H__
+#ifndef GRPC_INTERNAL_CORE_IOMGR_RESOLVE_ADDRESS_H
+#define GRPC_INTERNAL_CORE_IOMGR_RESOLVE_ADDRESS_H
 
 #include <stddef.h>
+#include "src/core/iomgr/exec_ctx.h"
+#include "src/core/iomgr/iomgr.h"
 
 #define GRPC_MAX_SOCKADDR_SIZE 128
 
 typedef struct {
   char addr[GRPC_MAX_SOCKADDR_SIZE];
-  int len;
+  size_t len;
 } grpc_resolved_address;
 
 typedef struct {
@@ -52,7 +54,8 @@ typedef struct {
    On success: addresses is the result, and the callee must call
    grpc_resolved_addresses_destroy when it's done with them
    On failure: addresses is NULL */
-typedef void (*grpc_resolve_cb)(void *arg, grpc_resolved_addresses *addresses);
+typedef void (*grpc_resolve_cb)(grpc_exec_ctx *exec_ctx, void *arg,
+                                grpc_resolved_addresses *addresses);
 /* Asynchronously resolve addr. Use default_port if a port isn't designated
    in addr, otherwise use the port in addr. */
 /* TODO(ctiller): add a timeout here */
@@ -66,4 +69,4 @@ void grpc_resolved_addresses_destroy(grpc_resolved_addresses *addresses);
 grpc_resolved_addresses *grpc_blocking_resolve_address(
     const char *addr, const char *default_port);
 
-#endif /* __GRPC_INTERNAL_IOMGR_RESOLVE_ADDRESS_H__ */
+#endif /* GRPC_INTERNAL_CORE_IOMGR_RESOLVE_ADDRESS_H */

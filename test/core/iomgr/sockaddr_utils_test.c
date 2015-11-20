@@ -34,7 +34,6 @@
 #include "src/core/iomgr/sockaddr_utils.h"
 
 #include <errno.h>
-#include <netinet/in.h>
 #include <string.h>
 
 #include <grpc/support/alloc.h>
@@ -64,9 +63,11 @@ static struct sockaddr_in6 make_addr6(const gpr_uint8 *data, size_t data_len) {
 
 static const gpr_uint8 kMapped[] = {0, 0, 0,    0,    0,   0, 0, 0,
                                     0, 0, 0xff, 0xff, 192, 0, 2, 1};
+
 static const gpr_uint8 kNotQuiteMapped[] = {0, 0, 0,    0,    0,   0, 0, 0,
                                             0, 0, 0xff, 0xfe, 192, 0, 2, 99};
 static const gpr_uint8 kIPv4[] = {192, 0, 2, 1};
+
 static const gpr_uint8 kIPv6[] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
                                   0,    0,    0,    0,    0, 0, 0, 1};
 
@@ -76,7 +77,7 @@ static void test_sockaddr_is_v4mapped(void) {
   struct sockaddr_in output4;
   struct sockaddr_in expect4;
 
-  gpr_log(GPR_INFO, "%s", __FUNCTION__);
+  gpr_log(GPR_INFO, "%s", "test_sockaddr_is_v4mapped");
 
   /* v4mapped input should succeed. */
   input6 = make_addr6(kMapped, sizeof(kMapped));
@@ -107,7 +108,7 @@ static void test_sockaddr_to_v4mapped(void) {
   struct sockaddr_in6 output6;
   struct sockaddr_in6 expect6;
 
-  gpr_log(GPR_INFO, "%s", __FUNCTION__);
+  gpr_log(GPR_INFO, "%s", "test_sockaddr_to_v4mapped");
 
   /* IPv4 input should succeed. */
   input4 = make_addr4(kIPv4, sizeof(kIPv4));
@@ -136,7 +137,7 @@ static void test_sockaddr_is_wildcard(void) {
   struct sockaddr dummy;
   int port;
 
-  gpr_log(GPR_INFO, "%s", __FUNCTION__);
+  gpr_log(GPR_INFO, "%s", "test_sockaddr_is_wildcard");
 
   /* Generate wildcards. */
   grpc_sockaddr_make_wildcards(555, &wild4, &wild6);
@@ -188,35 +189,49 @@ static void expect_sockaddr_str(const char *expected, void *addr,
   gpr_free(str);
 }
 
+static void expect_sockaddr_uri(const char *expected, void *addr) {
+  char *str;
+  gpr_log(GPR_INFO, "  expect_sockaddr_uri(%s)", expected);
+  str = grpc_sockaddr_to_uri((struct sockaddr *)addr);
+  GPR_ASSERT(str != NULL);
+  GPR_ASSERT(strcmp(expected, str) == 0);
+  gpr_free(str);
+}
+
 static void test_sockaddr_to_string(void) {
   struct sockaddr_in input4;
   struct sockaddr_in6 input6;
   struct sockaddr dummy;
 
-  gpr_log(GPR_INFO, "%s", __FUNCTION__);
+  gpr_log(GPR_INFO, "%s", "test_sockaddr_to_string");
 
   errno = 0x7EADBEEF;
 
   input4 = make_addr4(kIPv4, sizeof(kIPv4));
   expect_sockaddr_str("192.0.2.1:12345", &input4, 0);
   expect_sockaddr_str("192.0.2.1:12345", &input4, 1);
+  expect_sockaddr_uri("ipv4:192.0.2.1:12345", &input4);
 
   input6 = make_addr6(kIPv6, sizeof(kIPv6));
   expect_sockaddr_str("[2001:db8::1]:12345", &input6, 0);
   expect_sockaddr_str("[2001:db8::1]:12345", &input6, 1);
+  expect_sockaddr_uri("ipv6:[2001:db8::1]:12345", &input6);
 
   input6 = make_addr6(kMapped, sizeof(kMapped));
   expect_sockaddr_str("[::ffff:192.0.2.1]:12345", &input6, 0);
   expect_sockaddr_str("192.0.2.1:12345", &input6, 1);
+  expect_sockaddr_uri("ipv4:192.0.2.1:12345", &input6);
 
   input6 = make_addr6(kNotQuiteMapped, sizeof(kNotQuiteMapped));
   expect_sockaddr_str("[::fffe:c000:263]:12345", &input6, 0);
   expect_sockaddr_str("[::fffe:c000:263]:12345", &input6, 1);
+  expect_sockaddr_uri("ipv6:[::fffe:c000:263]:12345", &input6);
 
   memset(&dummy, 0, sizeof(dummy));
   dummy.sa_family = 123;
   expect_sockaddr_str("(sockaddr family=123)", &dummy, 0);
   expect_sockaddr_str("(sockaddr family=123)", &dummy, 1);
+  GPR_ASSERT(grpc_sockaddr_to_uri(&dummy) == NULL);
 
   GPR_ASSERT(errno == 0x7EADBEEF);
 }

@@ -33,26 +33,21 @@
 
 #import "GRPCChannel.h"
 
-#import <grpc.h>
+#include <grpc/grpc.h>
 
 @implementation GRPCChannel
 
-+ (instancetype)channelToHost:(NSString *)host {
-  // TODO(jcanizales): Reuse channels.
-  return [[self alloc] initWithHost:host];
-}
-
 - (instancetype)init {
-  return [self initWithHost:nil];
+  return [self initWithChannel:NULL];
 }
 
 // Designated initializer
-- (instancetype)initWithHost:(NSString *)host {
-  if (!host) {
-    [NSException raise:NSInvalidArgumentException format:@"Host can't be nil."];
+- (instancetype)initWithChannel:(grpc_channel *)unmanagedChannel {
+  if (!unmanagedChannel) {
+    return nil;
   }
   if ((self = [super init])) {
-    _unmanagedChannel = grpc_channel_create(host.UTF8String, NULL);
+    _unmanagedChannel = unmanagedChannel;
   }
   return self;
 }

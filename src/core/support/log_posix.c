@@ -62,9 +62,9 @@ void gpr_log(const char *file, int line, gpr_log_severity severity,
   } else if ((size_t)ret <= sizeof(buf) - 1) {
     message = buf;
   } else {
-    message = allocated = gpr_malloc(ret + 1);
+    message = allocated = gpr_malloc((size_t)ret + 1);
     va_start(args, format);
-    vsnprintf(message, ret, format, args);
+    vsnprintf(message, (size_t)(ret + 1), format, args);
     va_end(args);
   }
   gpr_log_message(file, line, severity, message);
@@ -75,7 +75,7 @@ void gpr_default_log(gpr_log_func_args *args) {
   char *final_slash;
   const char *display_file;
   char time_buffer[64];
-  gpr_timespec now = gpr_now();
+  gpr_timespec now = gpr_now(GPR_CLOCK_REALTIME);
   struct tm tm;
 
   final_slash = strrchr(args->file, '/');

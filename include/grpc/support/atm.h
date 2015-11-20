@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_SUPPORT_ATM_H__
-#define __GRPC_SUPPORT_ATM_H__
+#ifndef GRPC_SUPPORT_ATM_H
+#define GRPC_SUPPORT_ATM_H
 
 /* This interface provides atomic operations and barriers.
    It is internal to gpr support code and should not be used outside it.
@@ -83,10 +83,10 @@
 #include <grpc/support/atm_gcc_atomic.h>
 #elif defined(GPR_GCC_SYNC)
 #include <grpc/support/atm_gcc_sync.h>
-#elif defined(GPR_WIN32)
+#elif defined(GPR_WIN32_ATOMIC)
 #include <grpc/support/atm_win32.h>
 #else
 #error could not determine platform for atm
 #endif
 
-#endif /* __GRPC_SUPPORT_ATM_H__ */
+#endif /* GRPC_SUPPORT_ATM_H */

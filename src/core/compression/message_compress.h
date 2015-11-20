@@ -31,22 +31,22 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_COMPRESSION_MESSAGE_COMPRESS_H__
-#define __GRPC_INTERNAL_COMPRESSION_MESSAGE_COMPRESS_H__
+#ifndef GRPC_INTERNAL_CORE_COMPRESSION_MESSAGE_COMPRESS_H
+#define GRPC_INTERNAL_CORE_COMPRESSION_MESSAGE_COMPRESS_H
 
-#include "src/core/compression/algorithm.h"
+#include <grpc/compression.h>
 #include <grpc/support/slice_buffer.h>
 
 /* compress 'input' to 'output' using 'algorithm'.
    On success, appends compressed slices to output and returns 1.
    On failure, appends uncompressed slices to output and returns 0. */
 int grpc_msg_compress(grpc_compression_algorithm algorithm,
-                      gpr_slice_buffer *input, gpr_slice_buffer *output);
+                      gpr_slice_buffer* input, gpr_slice_buffer* output);
 
 /* decompress 'input' to 'output' using 'algorithm'.
    On success, appends slices to output and returns 1.
    On failure, output is unchanged, and returns 0. */
 int grpc_msg_decompress(grpc_compression_algorithm algorithm,
-                        gpr_slice_buffer *input, gpr_slice_buffer *output);
+                        gpr_slice_buffer* input, gpr_slice_buffer* output);
 
-#endif /* __GRPC_INTERNAL_COMPRESSION_MESSAGE_COMPRESS_H__ */
+#endif /* GRPC_INTERNAL_CORE_COMPRESSION_MESSAGE_COMPRESS_H */

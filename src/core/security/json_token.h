@@ -31,20 +31,26 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_SECURITY_JSON_TOKEN_H_
-#define __GRPC_INTERNAL_SECURITY_JSON_TOKEN_H_
+#ifndef GRPC_INTERNAL_CORE_SECURITY_JSON_TOKEN_H
+#define GRPC_INTERNAL_CORE_SECURITY_JSON_TOKEN_H
 
 #include <grpc/support/slice.h>
 #include <openssl/rsa.h>
+
+#include "src/core/json/json.h"
 
 /* --- Constants. --- */
 
 #define GRPC_JWT_OAUTH2_AUDIENCE "https://www.googleapis.com/oauth2/v3/token"
 
+#define GRPC_AUTH_JSON_TYPE_INVALID "invalid"
+#define GRPC_AUTH_JSON_TYPE_SERVICE_ACCOUNT "service_account"
+#define GRPC_AUTH_JSON_TYPE_AUTHORIZED_USER "authorized_user"
+
 /* --- auth_json_key parsing. --- */
 
 typedef struct {
-  char *type;
+  const char *type;
   char *private_key_id;
   char *client_id;
   char *client_email;
@@ -58,6 +64,10 @@ int grpc_auth_json_key_is_valid(const grpc_auth_json_key *json_key);
    error has been encountered. */
 grpc_auth_json_key grpc_auth_json_key_create_from_string(
     const char *json_string);
+
+/* Creates a json_key object from parsed json. Returns an invalid object if a
+   parsing error has been encountered. */
+grpc_auth_json_key grpc_auth_json_key_create_from_json(const grpc_json *json);
 
 /* Destructs the object. */
 void grpc_auth_json_key_destruct(grpc_auth_json_key *json_key);
@@ -79,4 +89,30 @@ typedef char *(*grpc_jwt_encode_and_sign_override)(
 void grpc_jwt_encode_and_sign_set_override(
     grpc_jwt_encode_and_sign_override func);
 
-#endif /* __GRPC_INTERNAL_SECURITY_JSON_TOKEN_H_ */
+/* --- auth_refresh_token parsing. --- */
+
+typedef struct {
+  const char *type;
+  char *client_id;
+  char *client_secret;
+  char *refresh_token;
+} grpc_auth_refresh_token;
+
+/* Returns 1 if the object is valid, 0 otherwise. */
+int grpc_auth_refresh_token_is_valid(
+    const grpc_auth_refresh_token *refresh_token);
+
+/* Creates a refresh token object from string. Returns an invalid object if a
+   parsing error has been encountered. */
+grpc_auth_refresh_token grpc_auth_refresh_token_create_from_string(
+    const char *json_string);
+
+/* Creates a refresh token object from parsed json. Returns an invalid object if
+   a parsing error has been encountered. */
+grpc_auth_refresh_token grpc_auth_refresh_token_create_from_json(
+    const grpc_json *json);
+
+/* Destructs the object. */
+void grpc_auth_refresh_token_destruct(grpc_auth_refresh_token *refresh_token);
+
+#endif /* GRPC_INTERNAL_CORE_SECURITY_JSON_TOKEN_H */

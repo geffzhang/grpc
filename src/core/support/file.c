@@ -38,44 +38,45 @@
 
 #include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
+#include <grpc/support/string_util.h>
 
+#include "src/core/support/block_annotate.h"
 #include "src/core/support/string.h"
 
-gpr_slice gpr_load_file(const char *filename, int *success) {
+gpr_slice gpr_load_file(const char *filename, int add_null_terminator,
+                        int *success) {
   unsigned char *contents = NULL;
   size_t contents_size = 0;
-  unsigned char buf[4096];
   char *error_msg = NULL;
   gpr_slice result = gpr_empty_slice();
-  FILE *file = fopen(filename, "rb");
+  FILE *file;
+  size_t bytes_read = 0;
 
+  GRPC_SCHEDULING_START_BLOCKING_REGION;
+  file = fopen(filename, "rb");
   if (file == NULL) {
     gpr_asprintf(&error_msg, "Could not open file %s (error = %s).", filename,
                  strerror(errno));
     GPR_ASSERT(error_msg != NULL);
     goto end;
   }
-
-  while (1) {
-    size_t bytes_read = fread(buf, 1, sizeof(buf), file);
-    if (bytes_read > 0) {
-      contents = gpr_realloc(contents, contents_size + bytes_read);
-      memcpy(contents + contents_size, buf, bytes_read);
-      contents_size += bytes_read;
-    }
-    if (bytes_read < sizeof(buf)) {
-      if (ferror(file)) {
-        gpr_asprintf(&error_msg, "Error %s occured while reading file %s.",
-                     strerror(errno), filename);
-        GPR_ASSERT(error_msg != NULL);
-        goto end;
-      } else {
-        GPR_ASSERT(feof(file));
-        break;
-      }
-    }
+  fseek(file, 0, SEEK_END);
+  /* Converting to size_t on the assumption that it will not fail */
+  contents_size = (size_t)ftell(file);
+  fseek(file, 0, SEEK_SET);
+  contents = gpr_malloc(contents_size + (add_null_terminator ? 1 : 0));
+  bytes_read = fread(contents, 1, contents_size, file);
+  if (bytes_read < contents_size) {
+    GPR_ASSERT(ferror(file));
+    gpr_asprintf(&error_msg, "Error %s occured while reading file %s.",
+                 strerror(errno), filename);
+    GPR_ASSERT(error_msg != NULL);
+    goto end;
   }
   if (success != NULL) *success = 1;
+  if (add_null_terminator) {
+    contents[contents_size++] = 0;
+  }
   result = gpr_slice_new(contents, contents_size, gpr_free);
 
 end:
@@ -85,5 +86,6 @@ end:
     if (success != NULL) *success = 0;
   }
   if (file != NULL) fclose(file);
+  GRPC_SCHEDULING_END_BLOCKING_REGION;
   return result;
 }

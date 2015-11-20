@@ -31,31 +31,25 @@
  *
  */
 
-#ifndef __GRPC_SUPPORT_SYNC_GENERIC_H__
-#define __GRPC_SUPPORT_SYNC_GENERIC_H__
+#ifndef GRPC_SUPPORT_SYNC_GENERIC_H
+#define GRPC_SUPPORT_SYNC_GENERIC_H
 /* Generic type defintions for gpr_sync. */
 
 #include <grpc/support/atm.h>
 
 /* gpr_event */
-typedef struct {
-  gpr_atm state;
-} gpr_event;
+typedef struct { gpr_atm state; } gpr_event;
 
 #define GPR_EVENT_INIT \
   { 0 }
 
 /* gpr_refcount */
-typedef struct {
-  gpr_atm count;
-} gpr_refcount;
+typedef struct { gpr_atm count; } gpr_refcount;
 
 /* gpr_stats_counter */
-typedef struct {
-  gpr_atm value;
-} gpr_stats_counter;
+typedef struct { gpr_atm value; } gpr_stats_counter;
 
 #define GPR_STATS_INIT \
   { 0 }
 
-#endif /* __GRPC_SUPPORT_SYNC_GENERIC_H__ */
+#endif /* GRPC_SUPPORT_SYNC_GENERIC_H */

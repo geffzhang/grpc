@@ -31,10 +31,11 @@
  *
  */
 
-#include "src/core/surface/lame_client.h"
+#include <grpc/grpc.h>
 
 #include "test/core/end2end/cq_verifier.h"
 #include "test/core/util/test_config.h"
+#include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 
 static void *tag(gpr_intptr x) { return (void *)x; }
@@ -42,36 +43,59 @@ static void *tag(gpr_intptr x) { return (void *)x; }
 int main(int argc, char **argv) {
   grpc_channel *chan;
   grpc_call *call;
-  grpc_metadata md = {"a", "b", 1};
   grpc_completion_queue *cq;
   cq_verifier *cqv;
+  grpc_op ops[6];
+  grpc_op *op;
+  grpc_metadata_array trailing_metadata_recv;
+  grpc_status_code status;
+  grpc_call_error error;
+  char *details = NULL;
+  size_t details_capacity = 0;
 
   grpc_test_init(argc, argv);
   grpc_init();
 
-  chan = grpc_lame_client_channel_create();
+  grpc_metadata_array_init(&trailing_metadata_recv);
+
+  chan = grpc_lame_client_channel_create(
+      "lampoon:national", GRPC_STATUS_UNKNOWN, "Rpc sent on a lame channel.");
   GPR_ASSERT(chan);
-  call = grpc_channel_create_call_old(chan, "/Foo", "anywhere",
-                                      GRPC_TIMEOUT_SECONDS_TO_DEADLINE(100));
+  cq = grpc_completion_queue_create(NULL);
+  call = grpc_channel_create_call(chan, NULL, GRPC_PROPAGATE_DEFAULTS, cq,
+                                  "/Foo", "anywhere",
+                                  GRPC_TIMEOUT_SECONDS_TO_DEADLINE(100), NULL);
   GPR_ASSERT(call);
-  cq = grpc_completion_queue_create();
   cqv = cq_verifier_create(cq);
 
-  /* we should be able to add metadata */
-  GPR_ASSERT(GRPC_CALL_OK == grpc_call_add_metadata_old(call, &md, 0));
-
-  /* and invoke the call */
-  GPR_ASSERT(GRPC_CALL_OK == grpc_call_invoke_old(call, cq, tag(2), tag(3), 0));
+  op = ops;
+  op->op = GRPC_OP_SEND_INITIAL_METADATA;
+  op->data.send_initial_metadata.count = 0;
+  op->flags = 0;
+  op->reserved = NULL;
+  op++;
+  op->op = GRPC_OP_RECV_STATUS_ON_CLIENT;
+  op->data.recv_status_on_client.trailing_metadata = &trailing_metadata_recv;
+  op->data.recv_status_on_client.status = &status;
+  op->data.recv_status_on_client.status_details = &details;
+  op->data.recv_status_on_client.status_details_capacity = &details_capacity;
+  op->flags = 0;
+  op->reserved = NULL;
+  op++;
+  error = grpc_call_start_batch(call, ops, (size_t)(op - ops), tag(1), NULL);
+  GPR_ASSERT(GRPC_CALL_OK == error);
 
   /* the call should immediately fail */
-  cq_expect_client_metadata_read(cqv, tag(2), NULL);
-  cq_expect_finished(cqv, tag(3), NULL);
+  cq_expect_completion(cqv, tag(1), 1);
   cq_verify(cqv);
 
   grpc_call_destroy(call);
   grpc_channel_destroy(chan);
   cq_verifier_destroy(cqv);
   grpc_completion_queue_destroy(cq);
+
+  grpc_metadata_array_destroy(&trailing_metadata_recv);
+  gpr_free(details);
 
   grpc_shutdown();
 

@@ -31,34 +31,42 @@
  *
  */
 
+/**
+ * This module contains functions that are common to client and server
+ * code. None of them should be used directly by gRPC users.
+ * @module
+ */
+
 'use strict';
 
-var _ = require('underscore');
-
-var capitalize = require('underscore.string/capitalize');
+var _ = require('lodash');
 
 /**
  * Get a function that deserializes a specific type of protobuf.
  * @param {function()} cls The constructor of the message type to deserialize
  * @return {function(Buffer):cls} The deserialization function
  */
-function deserializeCls(cls) {
+exports.deserializeCls = function deserializeCls(cls) {
   /**
    * Deserialize a buffer to a message object
    * @param {Buffer} arg_buf The buffer to deserialize
    * @return {cls} The resulting object
    */
   return function deserialize(arg_buf) {
-    return cls.decode(arg_buf);
+    // Convert to a native object with binary fields as Buffers (first argument)
+    // and longs as strings (second argument)
+    return cls.decode(arg_buf).toRaw(false, true);
   };
-}
+};
+
+var deserializeCls = exports.deserializeCls;
 
 /**
  * Get a function that serializes objects to a buffer by protobuf class.
  * @param {function()} Cls The constructor of the message type to serialize
  * @return {function(Cls):Buffer} The serialization function
  */
-function serializeCls(Cls) {
+exports.serializeCls = function serializeCls(Cls) {
   /**
    * Serialize an object to a Buffer
    * @param {Object} arg The object to serialize
@@ -67,29 +75,28 @@ function serializeCls(Cls) {
   return function serialize(arg) {
     return new Buffer(new Cls(arg).encode().toBuffer());
   };
-}
+};
+
+var serializeCls = exports.serializeCls;
 
 /**
  * Get the fully qualified (dotted) name of a ProtoBuf.Reflect value.
  * @param {ProtoBuf.Reflect.Namespace} value The value to get the name of
  * @return {string} The fully qualified name of the value
  */
-function fullyQualifiedName(value) {
+exports.fullyQualifiedName = function fullyQualifiedName(value) {
   if (value === null || value === undefined) {
     return '';
   }
   var name = value.name;
-  if (value.className === 'Service.RPCMethod') {
-    name = capitalize(name);
-  }
-  if (value.hasOwnProperty('parent')) {
-    var parent_name = fullyQualifiedName(value.parent);
-    if (parent_name !== '') {
-      name = parent_name + '.' + name;
-    }
+  var parent_name = fullyQualifiedName(value.parent);
+  if (parent_name !== '') {
+    name = parent_name + '.' + name;
   }
   return name;
-}
+};
+
+var fullyQualifiedName = exports.fullyQualifiedName;
 
 /**
  * Wrap a function to pass null-like values through without calling it. If no
@@ -97,7 +104,7 @@ function fullyQualifiedName(value) {
  * @param {?function} func The function to wrap
  * @return {function} The wrapped function
  */
-function wrapIgnoreNull(func) {
+exports.wrapIgnoreNull = function wrapIgnoreNull(func) {
   if (!func) {
     return _.identity;
   }
@@ -107,24 +114,24 @@ function wrapIgnoreNull(func) {
     }
     return func(arg);
   };
-}
+};
 
 /**
- * See docs for deserializeCls
+ * Return a map from method names to method attributes for the service.
+ * @param {ProtoBuf.Reflect.Service} service The service to get attributes for
+ * @return {Object} The attributes map
  */
-exports.deserializeCls = deserializeCls;
-
-/**
- * See docs for serializeCls
- */
-exports.serializeCls = serializeCls;
-
-/**
- * See docs for fullyQualifiedName
- */
-exports.fullyQualifiedName = fullyQualifiedName;
-
-/**
- * See docs for wrapIgnoreNull
- */
-exports.wrapIgnoreNull = wrapIgnoreNull;
+exports.getProtobufServiceAttrs = function getProtobufServiceAttrs(service) {
+  var prefix = '/' + fullyQualifiedName(service) + '/';
+  return _.object(_.map(service.children, function(method) {
+    return [_.camelCase(method.name), {
+      path: prefix + _.capitalize(method.name),
+      requestStream: method.requestStream,
+      responseStream: method.responseStream,
+      requestSerialize: serializeCls(method.resolvedRequestType.build()),
+      requestDeserialize: deserializeCls(method.resolvedRequestType.build()),
+      responseSerialize: serializeCls(method.resolvedResponseType.build()),
+      responseDeserialize: deserializeCls(method.resolvedResponseType.build())
+    }];
+  }));
+};

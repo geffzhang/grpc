@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_SUPPORT_CPU_H__
-#define __GRPC_INTERNAL_SUPPORT_CPU_H__
+#ifndef GRPC_SUPPORT_CPU_H
+#define GRPC_SUPPORT_CPU_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,7 +41,7 @@ extern "C" {
 /* Interface providing CPU information for currently running system */
 
 /* Return the number of CPU cores on the current system. Will return 0 if
-   if information is not available. */
+   the information is not available. */
 unsigned gpr_cpu_num_cores(void);
 
 /* Return the CPU on which the current thread is executing; N.B. This should
@@ -54,4 +54,4 @@ unsigned gpr_cpu_current_cpu(void);
 }  // extern "C"
 #endif
 
-#endif /* __GRPC_INTERNAL_SUPPORT_CPU_H__ */
+#endif /* GRPC_SUPPORT_CPU_H */

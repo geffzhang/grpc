@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_IOMGR_SOCKET_UTILS_POSIX_H__
-#define __GRPC_INTERNAL_IOMGR_SOCKET_UTILS_POSIX_H__
+#ifndef GRPC_INTERNAL_CORE_IOMGR_SOCKET_UTILS_POSIX_H
+#define GRPC_INTERNAL_CORE_IOMGR_SOCKET_UTILS_POSIX_H
 
 #include <unistd.h>
 #include <sys/socket.h>
@@ -62,6 +62,11 @@ int grpc_set_socket_low_latency(int fd, int low_latency);
    without a valid loopback interface.  Rather than expose this half-broken
    state to library users, we turn off IPv6 sockets. */
 int grpc_ipv6_loopback_available(void);
+
+/* Tries to set SO_NOSIGPIPE if available on this platform.
+   Returns 1 on success, 0 on failure.
+   If SO_NO_SIGPIPE is not available, returns 1. */
+int grpc_set_socket_no_sigpipe_if_possible(int fd);
 
 /* An enum to keep track of IPv4/IPv6 socket modes.
 
@@ -105,4 +110,4 @@ extern int grpc_forbid_dualstack_sockets_for_testing;
 int grpc_create_dualstack_socket(const struct sockaddr *addr, int type,
                                  int protocol, grpc_dualstack_mode *dsmode);
 
-#endif /* __GRPC_INTERNAL_IOMGR_SOCKET_UTILS_POSIX_H__ */
+#endif /* GRPC_INTERNAL_CORE_IOMGR_SOCKET_UTILS_POSIX_H */

@@ -9,25 +9,40 @@ wiki pages:
 * If you are in a hurry *
 *************************
 
+On Linux (Debian):
+
+ Note: you will need to add the Debian 'jessie-backports' distribution to your sources
+ file first.
+
+ Add the following line to your `/etc/apt/sources.list` file:
+
+   deb http://http.debian.net/debian jessie-backports main
+
+ Install the gRPC library:
+
+ $ [sudo] apt-get install libgrpc-dev
+
+OR
+
  $ git clone https://github.com/grpc/grpc.git
  $ cd grpc
  $ git submodule update --init
  $ make 
- $ sudo make install
+ $ [sudo] make install
 
 You don't need anything else than GNU Make, gcc and autotools. Under a Debian
 or Ubuntu system, this should boil down to the following packages:
 
-  $ apt-get install build-essential autoconf libtool
+ $ [sudo] apt-get install build-essential autoconf libtool
 
 Building the python wrapper requires the following:
 
-  # apt-get install python-all-dev python-virtualenv
+ $ [sudo] apt-get install python-all-dev python-virtualenv
 
 If you want to install in a different directory than the default /usr/lib, you can
 override it on the command line:
 
-  # make install prefix=/opt
+ $ [sudo] make install prefix=/opt
 
 
 *******************************
@@ -117,7 +132,7 @@ most Mac installations. Do the "git submodule" command listed above.
 Then execute the following for all the needed build dependencies
 
   $ sudo /opt/local/bin/port install autoconf automake libtool gflags cmake
-  $ mkdir ~/gtest
+  $ mkdir ~/gtest-svn
   $ svn checkout http://googletest.googlecode.com/svn/trunk/ gtest-svn
   $ mkdir mybuild
   $ cd mybuild
@@ -132,6 +147,7 @@ We will also need to make openssl and install it appropriately
 
   $ cd <git directory>
   $ cd third_party/openssl
+  $ ./config
   $ sudo make install
   $ cd ../../
 
@@ -139,6 +155,29 @@ If you are going to make changes and need to regenerate the projects file,
 you will need to install certain modules for python.
 
   $ sudo easy_install simplejson mako
+
+Mingw-specific notes:
+---------------------
+
+While gRPC compiles properly under mingw, some more preparation work is needed.
+The recommendation is to use msys2. The installation instructions are available
+at that address: http://msys2.github.io/
+
+Once this is installed, make sure you are using the following: MinGW-w64 Win64.
+You'll be required to install a few more packages:
+
+  $ pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib autoconf automake libtool
+
+Please also install OpenSSL from that website:
+
+  http://slproweb.com/products/Win32OpenSSL.html
+
+The package Win64 OpenSSL v1.0.2a should do. At that point you should be able
+to compile gRPC with the following:
+
+  $ export LDFLAGS="-L/mingw64/lib -L/c/OpenSSL-Win64"
+  $ export CPPFLAGS="-I/mingw64/include -I/c/OpenSSL-Win64/include"
+  $ make
 
 A word on OpenSSL
 -----------------

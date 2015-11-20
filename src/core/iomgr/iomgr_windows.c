@@ -43,6 +43,10 @@
 #include "src/core/iomgr/iocp_windows.h"
 #include "src/core/iomgr/iomgr.h"
 
+/* Windows' io manager is going to be fully designed using IO completion
+   ports. All of what we're doing here is basically make sure that
+   Windows sockets are initialized in and out. */
+
 static void winsock_init(void) {
   WSADATA wsaData;
   int status = WSAStartup(MAKEWORD(2, 0), &wsaData);
@@ -59,9 +63,11 @@ void grpc_iomgr_platform_init(void) {
   grpc_iocp_init();
 }
 
+void grpc_iomgr_platform_flush(void) { grpc_iocp_flush(); }
+
 void grpc_iomgr_platform_shutdown(void) {
   grpc_iocp_shutdown();
   winsock_shutdown();
 }
 
-#endif  /* GRPC_WINSOCK_SOCKET */
+#endif /* GRPC_WINSOCK_SOCKET */

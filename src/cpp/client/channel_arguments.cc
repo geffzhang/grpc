@@ -31,51 +31,80 @@
  *
  */
 
-#include <grpc++/channel_arguments.h>
+#include <grpc++/support/channel_arguments.h>
 
-#include <grpc/grpc_security.h>
+#include <grpc/support/log.h>
+#include "src/core/channel/channel_args.h"
 
 namespace grpc {
 
-void ChannelArguments::SetSslTargetNameOverride(const grpc::string &name) {
-  SetString(GRPC_SSL_TARGET_NAME_OVERRIDE_ARG, name);
-}
-
-grpc::string ChannelArguments::GetSslTargetNameOverride() const {
-  for (unsigned int i = 0; i < args_.size(); i++) {
-    if (grpc::string(GRPC_SSL_TARGET_NAME_OVERRIDE_ARG) == args_[i].key) {
-      return args_[i].value.string;
+ChannelArguments::ChannelArguments(const ChannelArguments& other)
+    : strings_(other.strings_) {
+  args_.reserve(other.args_.size());
+  auto list_it_dst = strings_.begin();
+  auto list_it_src = other.strings_.begin();
+  for (auto a = other.args_.begin(); a != other.args_.end(); ++a) {
+    grpc_arg ap;
+    ap.type = a->type;
+    GPR_ASSERT(list_it_src->c_str() == a->key);
+    ap.key = const_cast<char*>(list_it_dst->c_str());
+    ++list_it_src;
+    ++list_it_dst;
+    switch (a->type) {
+      case GRPC_ARG_INTEGER:
+        ap.value.integer = a->value.integer;
+        break;
+      case GRPC_ARG_STRING:
+        GPR_ASSERT(list_it_src->c_str() == a->value.string);
+        ap.value.string = const_cast<char*>(list_it_dst->c_str());
+        ++list_it_src;
+        ++list_it_dst;
+        break;
+      case GRPC_ARG_POINTER:
+        ap.value.pointer = a->value.pointer;
+        ap.value.pointer.p = a->value.pointer.copy(ap.value.pointer.p);
+        break;
     }
+    args_.push_back(ap);
   }
-  return "";
 }
 
-void ChannelArguments::SetInt(const grpc::string &key, int value) {
+void ChannelArguments::Swap(ChannelArguments& other) {
+  args_.swap(other.args_);
+  strings_.swap(other.strings_);
+}
+
+void ChannelArguments::SetCompressionAlgorithm(
+    grpc_compression_algorithm algorithm) {
+  SetInt(GRPC_COMPRESSION_ALGORITHM_ARG, algorithm);
+}
+
+void ChannelArguments::SetInt(const grpc::string& key, int value) {
   grpc_arg arg;
   arg.type = GRPC_ARG_INTEGER;
   strings_.push_back(key);
-  arg.key = const_cast<char *>(strings_.back().c_str());
+  arg.key = const_cast<char*>(strings_.back().c_str());
   arg.value.integer = value;
 
   args_.push_back(arg);
 }
 
-void ChannelArguments::SetString(const grpc::string &key,
-                                 const grpc::string &value) {
+void ChannelArguments::SetString(const grpc::string& key,
+                                 const grpc::string& value) {
   grpc_arg arg;
   arg.type = GRPC_ARG_STRING;
   strings_.push_back(key);
-  arg.key = const_cast<char *>(strings_.back().c_str());
+  arg.key = const_cast<char*>(strings_.back().c_str());
   strings_.push_back(value);
-  arg.value.string = const_cast<char *>(strings_.back().c_str());
+  arg.value.string = const_cast<char*>(strings_.back().c_str());
 
   args_.push_back(arg);
 }
 
-void ChannelArguments::SetChannelArgs(grpc_channel_args *channel_args) const {
+void ChannelArguments::SetChannelArgs(grpc_channel_args* channel_args) const {
   channel_args->num_args = args_.size();
   if (channel_args->num_args > 0) {
-    channel_args->args = const_cast<grpc_arg *>(&args_[0]);
+    channel_args->args = const_cast<grpc_arg*>(&args_[0]);
   }
 }
 

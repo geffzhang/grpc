@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_TRANSPORT_METADATA_H__
-#define __GRPC_INTERNAL_TRANSPORT_METADATA_H__
+#ifndef GRPC_INTERNAL_CORE_TRANSPORT_METADATA_H
+#define GRPC_INTERNAL_CORE_TRANSPORT_METADATA_H
 
 #include <grpc/support/slice.h>
 #include <grpc/support/useful.h>
@@ -96,6 +96,7 @@ size_t grpc_mdctx_get_mdtab_free_test_only(grpc_mdctx *mdctx);
 /* Constructors for grpc_mdstr instances; take a variety of data types that
    clients may have handy */
 grpc_mdstr *grpc_mdstr_from_string(grpc_mdctx *ctx, const char *str);
+/* Unrefs the slice. */
 grpc_mdstr *grpc_mdstr_from_slice(grpc_mdctx *ctx, gpr_slice slice);
 grpc_mdstr *grpc_mdstr_from_buffer(grpc_mdctx *ctx, const gpr_uint8 *str,
                                    size_t length);
@@ -110,6 +111,7 @@ grpc_mdelem *grpc_mdelem_from_metadata_strings(grpc_mdctx *ctx, grpc_mdstr *key,
                                                grpc_mdstr *value);
 grpc_mdelem *grpc_mdelem_from_strings(grpc_mdctx *ctx, const char *key,
                                       const char *value);
+/* Unrefs the slices. */
 grpc_mdelem *grpc_mdelem_from_slices(grpc_mdctx *ctx, gpr_slice key,
                                      gpr_slice value);
 grpc_mdelem *grpc_mdelem_from_string_and_buffer(grpc_mdctx *ctx,
@@ -125,16 +127,34 @@ void grpc_mdelem_set_user_data(grpc_mdelem *md, void (*destroy_func)(void *),
                                void *user_data);
 
 /* Reference counting */
+#ifdef GRPC_METADATA_REFCOUNT_DEBUG
+#define GRPC_MDSTR_REF(s) grpc_mdstr_ref((s), __FILE__, __LINE__)
+#define GRPC_MDSTR_UNREF(s) grpc_mdstr_unref((s), __FILE__, __LINE__)
+#define GRPC_MDELEM_REF(s) grpc_mdelem_ref((s), __FILE__, __LINE__)
+#define GRPC_MDELEM_UNREF(s) grpc_mdelem_unref((s), __FILE__, __LINE__)
+grpc_mdstr *grpc_mdstr_ref(grpc_mdstr *s, const char *file, int line);
+void grpc_mdstr_unref(grpc_mdstr *s, const char *file, int line);
+grpc_mdelem *grpc_mdelem_ref(grpc_mdelem *md, const char *file, int line);
+void grpc_mdelem_unref(grpc_mdelem *md, const char *file, int line);
+#else
+#define GRPC_MDSTR_REF(s) grpc_mdstr_ref((s))
+#define GRPC_MDSTR_UNREF(s) grpc_mdstr_unref((s))
+#define GRPC_MDELEM_REF(s) grpc_mdelem_ref((s))
+#define GRPC_MDELEM_UNREF(s) grpc_mdelem_unref((s))
 grpc_mdstr *grpc_mdstr_ref(grpc_mdstr *s);
 void grpc_mdstr_unref(grpc_mdstr *s);
-
 grpc_mdelem *grpc_mdelem_ref(grpc_mdelem *md);
 void grpc_mdelem_unref(grpc_mdelem *md);
+#endif
 
 /* Recover a char* from a grpc_mdstr. The returned string is null terminated.
    Does not promise that the returned string has no embedded nulls however. */
 const char *grpc_mdstr_as_c_string(grpc_mdstr *s);
 
+int grpc_mdstr_is_legal_header(grpc_mdstr *s);
+int grpc_mdstr_is_legal_nonbin_header(grpc_mdstr *s);
+int grpc_mdstr_is_bin_suffixed(grpc_mdstr *s);
+
 #define GRPC_MDSTR_KV_HASH(k_hash, v_hash) (GPR_ROTL((k_hash), 2) ^ (v_hash))
 
-#endif /* __GRPC_INTERNAL_TRANSPORT_METADATA_H__ */
+#endif /* GRPC_INTERNAL_CORE_TRANSPORT_METADATA_H */

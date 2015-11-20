@@ -31,28 +31,84 @@
  *
  */
 
-#ifndef __GRPC_SUPPORT_PORT_PLATFORM_H__
-#define __GRPC_SUPPORT_PORT_PLATFORM_H__
+#ifndef GRPC_SUPPORT_PORT_PLATFORM_H
+#define GRPC_SUPPORT_PORT_PLATFORM_H
+
+/* Get windows.h included everywhere (we need it) */
+#if defined(_WIN64) || defined(WIN64) || defined(_WIN32) || defined(WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define GRPC_WIN32_LEAN_AND_MEAN_WAS_NOT_DEFINED
+#define WIN32_LEAN_AND_MEAN
+#endif /* WIN32_LEAN_AND_MEAN */
+
+#ifndef NOMINMAX
+#define GRPC_NOMINMX_WAS_NOT_DEFINED
+#define NOMINMAX
+#endif /* NOMINMAX */
+
+#ifndef _WIN32_WINNT
+#error \
+    "Please compile grpc with _WIN32_WINNT of at least 0x600 (aka Windows Vista)"
+#else /* !defined(_WIN32_WINNT) */
+#if (_WIN32_WINNT < 0x0600)
+#error \
+    "Please compile grpc with _WIN32_WINNT of at least 0x600 (aka Windows Vista)"
+#endif /* _WIN32_WINNT < 0x0600 */
+#endif /* defined(_WIN32_WINNT) */
+
+#include <windows.h>
+
+#ifdef GRPC_WIN32_LEAN_AND_MEAN_WAS_NOT_DEFINED
+#undef GRPC_WIN32_LEAN_AND_MEAN_WAS_NOT_DEFINED
+#undef WIN32_LEAN_AND_MEAN
+#endif /* GRPC_WIN32_LEAN_AND_MEAN_WAS_NOT_DEFINED */
+
+#ifdef GRPC_NOMINMAX_WAS_NOT_DEFINED
+#undef GRPC_NOMINMAX_WAS_NOT_DEFINED
+#undef NOMINMAX
+#endif /* GRPC_WIN32_LEAN_AND_MEAN_WAS_NOT_DEFINED */
+#endif /* defined(_WIN64) || defined(WIN64) || defined(_WIN32) || \
+          defined(WIN32) */
 
 /* Override this file with one for your platform if you need to redefine
    things.  */
 
 #if !defined(GPR_NO_AUTODETECT_PLATFORM)
 #if defined(_WIN64) || defined(WIN64)
+#define GPR_PLATFORM_STRING "windows"
 #define GPR_WIN32 1
 #define GPR_ARCH_64 1
 #define GPR_GETPID_IN_PROCESS_H 1
 #define GPR_WINSOCK_SOCKET 1
+#ifdef __GNUC__
+#define GPR_GCC_ATOMIC 1
+#define GPR_GCC_TLS 1
+#else
+#define GPR_WIN32_ATOMIC 1
+#define GPR_MSVC_TLS 1
+#endif
+#define GPR_WINDOWS_CRASH_HANDLER 1
 #elif defined(_WIN32) || defined(WIN32)
+#define GPR_PLATFORM_STRING "windows"
 #define GPR_ARCH_32 1
 #define GPR_WIN32 1
 #define GPR_GETPID_IN_PROCESS_H 1
 #define GPR_WINSOCK_SOCKET 1
+#ifdef __GNUC__
+#define GPR_GCC_ATOMIC 1
+#define GPR_GCC_TLS 1
+#else
+#define GPR_WIN32_ATOMIC 1
+#define GPR_MSVC_TLS 1
+#endif
+#define GPR_WINDOWS_CRASH_HANDLER 1
 #elif defined(ANDROID) || defined(__ANDROID__)
+#define GPR_PLATFORM_STRING "android"
 #define GPR_ANDROID 1
 #define GPR_ARCH_32 1
 #define GPR_CPU_LINUX 1
 #define GPR_GCC_SYNC 1
+#define GPR_GCC_TLS 1
 #define GPR_POSIX_MULTIPOLL_WITH_POLL 1
 #define GPR_POSIX_WAKEUP_FD 1
 #define GPR_LINUX_EVENTFD 1
@@ -62,10 +118,14 @@
 #define GPR_POSIX_ENV 1
 #define GPR_POSIX_FILE 1
 #define GPR_POSIX_STRING 1
+#define GPR_POSIX_SUBPROCESS 1
 #define GPR_POSIX_SYNC 1
 #define GPR_POSIX_TIME 1
 #define GPR_GETPID_IN_UNISTD_H 1
+#define GPR_HAVE_MSG_NOSIGNAL 1
 #elif defined(__linux__)
+#define GPR_POSIX_CRASH_HANDLER 1
+#define GPR_PLATFORM_STRING "linux"
 #ifndef _BSD_SOURCE
 #define _BSD_SOURCE
 #endif
@@ -78,6 +138,7 @@
 #include <features.h>
 #define GPR_CPU_LINUX 1
 #define GPR_GCC_ATOMIC 1
+#define GPR_GCC_TLS 1
 #define GPR_LINUX 1
 #define GPR_LINUX_MULTIPOLL_WITH_EPOLL 1
 #define GPR_POSIX_WAKEUP_FD 1
@@ -105,19 +166,33 @@
 #endif
 #define GPR_POSIX_FILE 1
 #define GPR_POSIX_STRING 1
+#define GPR_POSIX_SUBPROCESS 1
 #define GPR_POSIX_SYNC 1
 #define GPR_POSIX_TIME 1
 #define GPR_GETPID_IN_UNISTD_H 1
+#define GPR_HAVE_MSG_NOSIGNAL 1
 #ifdef _LP64
 #define GPR_ARCH_64 1
 #else /* _LP64 */
 #define GPR_ARCH_32 1
 #endif /* _LP64 */
 #elif defined(__APPLE__)
+#include <TargetConditionals.h>
 #ifndef _BSD_SOURCE
 #define _BSD_SOURCE
 #endif
+#define GPR_MSG_IOVLEN_TYPE int
+#if TARGET_OS_IPHONE
+#define GPR_FORBID_UNREACHABLE_CODE
+#define GPR_PLATFORM_STRING "ios"
+#define GPR_CPU_IPHONE 1
+#define GPR_PTHREAD_TLS 1
+#else /* TARGET_OS_IPHONE */
+#define GPR_PLATFORM_STRING "osx"
 #define GPR_CPU_POSIX 1
+#define GPR_GCC_TLS 1
+#define GPR_POSIX_CRASH_HANDLER 1
+#endif
 #define GPR_GCC_ATOMIC 1
 #define GPR_POSIX_LOG 1
 #define GPR_POSIX_MULTIPOLL_WITH_POLL 1
@@ -129,9 +204,39 @@
 #define GPR_POSIX_ENV 1
 #define GPR_POSIX_FILE 1
 #define GPR_POSIX_STRING 1
+#define GPR_POSIX_SUBPROCESS 1
 #define GPR_POSIX_SYNC 1
 #define GPR_POSIX_TIME 1
 #define GPR_GETPID_IN_UNISTD_H 1
+#define GPR_HAVE_SO_NOSIGPIPE 1
+#ifdef _LP64
+#define GPR_ARCH_64 1
+#else /* _LP64 */
+#define GPR_ARCH_32 1
+#endif /* _LP64 */
+#elif defined(__FreeBSD__)
+#define GPR_PLATFORM_STRING "freebsd"
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE
+#endif
+#define GPR_CPU_POSIX 1
+#define GPR_GCC_ATOMIC 1
+#define GPR_GCC_TLS 1
+#define GPR_POSIX_LOG 1
+#define GPR_POSIX_MULTIPOLL_WITH_POLL 1
+#define GPR_POSIX_WAKEUP_FD 1
+#define GPR_POSIX_NO_SPECIAL_WAKEUP_FD 1
+#define GPR_POSIX_SOCKET 1
+#define GPR_POSIX_SOCKETADDR 1
+#define GPR_POSIX_SOCKETUTILS 1
+#define GPR_POSIX_ENV 1
+#define GPR_POSIX_FILE 1
+#define GPR_POSIX_STRING 1
+#define GPR_POSIX_SUBPROCESS 1
+#define GPR_POSIX_SYNC 1
+#define GPR_POSIX_TIME 1
+#define GPR_GETPID_IN_UNISTD_H 1
+#define GPR_HAVE_SO_NOSIGPIPE 1
 #ifdef _LP64
 #define GPR_ARCH_64 1
 #else /* _LP64 */
@@ -141,6 +246,11 @@
 #error Could not auto-detect platform
 #endif
 #endif /* GPR_NO_AUTODETECT_PLATFORM */
+
+#ifndef GPR_PLATFORM_STRING
+#warning "GPR_PLATFORM_STRING not auto-detected"
+#define GPR_PLATFORM_STRING "unknown"
+#endif
 
 /* For a common case, assume that the platform has a C99-like stdint.h */
 
@@ -167,24 +277,36 @@
 #endif
 
 /* Validate platform combinations */
-#if defined(GPR_GCC_ATOMIC) + defined(GPR_GCC_SYNC) + defined(GPR_WIN32) != 1
-#error Must define exactly one of GPR_GCC_ATOMIC, GPR_GCC_SYNC, GPR_WIN32
+#if defined(GPR_GCC_ATOMIC) + defined(GPR_GCC_SYNC) + \
+        defined(GPR_WIN32_ATOMIC) !=                  \
+    1
+#error Must define exactly one of GPR_GCC_ATOMIC, GPR_GCC_SYNC, GPR_WIN32_ATOMIC
 #endif
 
 #if defined(GPR_ARCH_32) + defined(GPR_ARCH_64) != 1
 #error Must define exactly one of GPR_ARCH_32, GPR_ARCH_64
 #endif
 
-#if defined(GPR_CPU_LINUX) + defined(GPR_CPU_POSIX) + defined(GPR_WIN32) != 1
-#error Must define exactly one of GPR_CPU_LINUX, GPR_CPU_POSIX, GPR_WIN32
+#if defined(GPR_CPU_LINUX) + defined(GPR_CPU_POSIX) + defined(GPR_WIN32) + \
+        defined(GPR_CPU_IPHONE) + defined(GPR_CPU_CUSTOM) !=               \
+    1
+#error Must define exactly one of GPR_CPU_LINUX, GPR_CPU_POSIX, GPR_WIN32, GPR_CPU_IPHONE, GPR_CPU_CUSTOM
 #endif
 
 #if defined(GPR_POSIX_MULTIPOLL_WITH_POLL) && !defined(GPR_POSIX_SOCKET)
 #error Must define GPR_POSIX_SOCKET to use GPR_POSIX_MULTIPOLL_WITH_POLL
 #endif
 
-#if defined(GPR_POSIX_SOCKET) + defined(GPR_WIN32) != 1
-#error Must define exactly one of GPR_POSIX_POLLSET, GPR_WIN32
+#if defined(GPR_POSIX_SOCKET) + defined(GPR_WINSOCK_SOCKET) + \
+        defined(GPR_CUSTOM_SOCKET) !=                         \
+    1
+#error Must define exactly one of GPR_POSIX_SOCKET, GPR_WINSOCK_SOCKET, GPR_CUSTOM_SOCKET
+#endif
+
+#if defined(GPR_MSVC_TLS) + defined(GPR_GCC_TLS) + defined(GPR_PTHREAD_TLS) + \
+        defined(GPR_CUSTOM_TLS) !=                                            \
+    1
+#error Must define exactly one of GPR_MSVC_TLS, GPR_GCC_TLS, GPR_PTHREAD_TLS, GPR_CUSTOM_TLS
 #endif
 
 typedef int16_t gpr_int16;
@@ -201,9 +323,29 @@ typedef uintptr_t gpr_uintptr;
 
 /* INT64_MAX is unavailable on some platforms. */
 #define GPR_INT64_MAX (gpr_int64)(~(gpr_uint64)0 >> 1)
+#define GPR_UINT32_MAX (~(gpr_uint32)0)
 
 /* maximum alignment needed for any type on this platform, rounded up to a
    power of two */
 #define GPR_MAX_ALIGNMENT 16
 
-#endif /* __GRPC_SUPPORT_PORT_PLATFORM_H__ */
+#ifndef GRPC_MUST_USE_RESULT
+#ifdef __GNUC__
+#define GRPC_MUST_USE_RESULT __attribute__((warn_unused_result))
+#else
+#define GRPC_MUST_USE_RESULT
+#endif
+#endif
+
+#ifdef GPR_FORBID_UNREACHABLE_CODE
+#define GPR_UNREACHABLE_CODE(STATEMENT)
+#else
+#define GPR_UNREACHABLE_CODE(STATEMENT)             \
+  do {                                              \
+    gpr_log(GPR_ERROR, "Should never reach here."); \
+    abort();                                        \
+    STATEMENT;                                      \
+  } while (0)
+#endif /* GPR_FORBID_UNREACHABLE_CODE */
+
+#endif /* GRPC_SUPPORT_PORT_PLATFORM_H */

@@ -34,54 +34,94 @@
 #include <grpc++/client_context.h>
 
 #include <grpc/grpc.h>
-#include "src/cpp/util/time.h"
+#include <grpc/support/alloc.h>
+#include <grpc/support/string_util.h>
+#include <grpc++/security/credentials.h>
+#include <grpc++/server_context.h>
+#include <grpc++/support/time.h>
 
-using std::chrono::system_clock;
+#include "src/core/channel/compress_filter.h"
+#include "src/cpp/common/create_auth_context.h"
 
 namespace grpc {
 
 ClientContext::ClientContext()
     : initial_metadata_received_(false),
       call_(nullptr),
-      cq_(nullptr),
-      absolute_deadline_(gpr_inf_future) {}
+      call_canceled_(false),
+      deadline_(gpr_inf_future(GPR_CLOCK_REALTIME)),
+      propagate_from_call_(nullptr) {}
 
 ClientContext::~ClientContext() {
   if (call_) {
     grpc_call_destroy(call_);
   }
-  if (cq_) {
-    grpc_completion_queue_shutdown(cq_);
-    // Drain cq_.
-    grpc_event *ev;
-    grpc_completion_type t;
-    do {
-      ev = grpc_completion_queue_next(cq_, gpr_inf_future);
-      t = ev->type;
-      grpc_event_finish(ev);
-    } while (t != GRPC_QUEUE_SHUTDOWN);
-    grpc_completion_queue_destroy(cq_);
-  }
 }
 
-void ClientContext::set_absolute_deadline(
-    const system_clock::time_point &deadline) {
-  Timepoint2Timespec(deadline, &absolute_deadline_);
+std::unique_ptr<ClientContext> ClientContext::FromServerContext(
+    const ServerContext& context, PropagationOptions options) {
+  std::unique_ptr<ClientContext> ctx(new ClientContext);
+  ctx->propagate_from_call_ = context.call_;
+  ctx->propagation_options_ = options;
+  return ctx;
 }
 
-system_clock::time_point ClientContext::absolute_deadline() {
-  return Timespec2Timepoint(absolute_deadline_);
-}
-
-void ClientContext::AddMetadata(const grpc::string &meta_key,
-                                const grpc::string &meta_value) {
+void ClientContext::AddMetadata(const grpc::string& meta_key,
+                                const grpc::string& meta_value) {
   send_initial_metadata_.insert(std::make_pair(meta_key, meta_value));
 }
 
-void ClientContext::TryCancel() {
-  if (call_) {
-    grpc_call_cancel(call_);
+void ClientContext::set_call(grpc_call* call,
+                             const std::shared_ptr<Channel>& channel) {
+  grpc::unique_lock<grpc::mutex> lock(mu_);
+  GPR_ASSERT(call_ == nullptr);
+  call_ = call;
+  channel_ = channel;
+  if (creds_ && !creds_->ApplyToCall(call_)) {
+    grpc_call_cancel_with_status(call, GRPC_STATUS_CANCELLED,
+                                 "Failed to set credentials to rpc.", nullptr);
   }
+  if (call_canceled_) {
+    grpc_call_cancel(call_, nullptr);
+  }
+}
+
+void ClientContext::set_compression_algorithm(
+    grpc_compression_algorithm algorithm) {
+  char* algorithm_name = nullptr;
+  if (!grpc_compression_algorithm_name(algorithm, &algorithm_name)) {
+    gpr_log(GPR_ERROR, "Name for compression algorithm '%d' unknown.",
+            algorithm);
+    abort();
+  }
+  GPR_ASSERT(algorithm_name != nullptr);
+  AddMetadata(GRPC_COMPRESS_REQUEST_ALGORITHM_KEY, algorithm_name);
+}
+
+std::shared_ptr<const AuthContext> ClientContext::auth_context() const {
+  if (auth_context_.get() == nullptr) {
+    auth_context_ = CreateAuthContext(call_);
+  }
+  return auth_context_;
+}
+
+void ClientContext::TryCancel() {
+  grpc::unique_lock<grpc::mutex> lock(mu_);
+  if (call_) {
+    grpc_call_cancel(call_, nullptr);
+  } else {
+    call_canceled_ = true;
+  }
+}
+
+grpc::string ClientContext::peer() const {
+  grpc::string peer;
+  if (call_) {
+    char* c_peer = grpc_call_get_peer(call_);
+    peer = c_peer;
+    gpr_free(c_peer);
+  }
+  return peer;
 }
 
 }  // namespace grpc

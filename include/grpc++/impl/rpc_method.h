@@ -31,14 +31,12 @@
  *
  */
 
-#ifndef __GRPCPP_IMPL_RPC_METHOD_H__
-#define __GRPCPP_IMPL_RPC_METHOD_H__
+#ifndef GRPCXX_IMPL_RPC_METHOD_H
+#define GRPCXX_IMPL_RPC_METHOD_H
 
-namespace google {
-namespace protobuf {
-class Message;
-}  // namespace protobuf
-}  // namespace google
+#include <memory>
+
+#include <grpc++/channel.h>
 
 namespace grpc {
 
@@ -51,19 +49,25 @@ class RpcMethod {
     BIDI_STREAMING
   };
 
-  explicit RpcMethod(const char* name)
-      : name_(name), method_type_(NORMAL_RPC) {}
-  RpcMethod(const char* name, RpcType type) : name_(name), method_type_(type) {}
+  RpcMethod(const char* name, RpcType type)
+      : name_(name), method_type_(type), channel_tag_(NULL) {}
+
+  RpcMethod(const char* name, RpcType type,
+            const std::shared_ptr<Channel>& channel)
+      : name_(name),
+        method_type_(type),
+        channel_tag_(channel->RegisterMethod(name)) {}
 
   const char* name() const { return name_; }
-
   RpcType method_type() const { return method_type_; }
+  void* channel_tag() const { return channel_tag_; }
 
  private:
-  const char* name_;
+  const char* const name_;
   const RpcType method_type_;
+  void* const channel_tag_;
 };
 
 }  // namespace grpc
 
-#endif  // __GRPCPP_IMPL_RPC_METHOD_H__
+#endif  // GRPCXX_IMPL_RPC_METHOD_H

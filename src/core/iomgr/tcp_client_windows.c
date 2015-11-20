@@ -43,7 +43,7 @@
 #include <grpc/support/slice_buffer.h>
 #include <grpc/support/useful.h>
 
-#include "src/core/iomgr/alarm.h"
+#include "src/core/iomgr/timer.h"
 #include "src/core/iomgr/iocp_windows.h"
 #include "src/core/iomgr/tcp_client.h"
 #include "src/core/iomgr/tcp_windows.h"
@@ -52,79 +52,78 @@
 #include "src/core/iomgr/socket_windows.h"
 
 typedef struct {
-  void(*cb)(void *arg, grpc_endpoint *tcp);
-  void *cb_arg;
+  grpc_closure *on_done;
   gpr_mu mu;
   grpc_winsocket *socket;
   gpr_timespec deadline;
-  grpc_alarm alarm;
+  grpc_timer alarm;
+  char *addr_name;
   int refs;
+  grpc_closure on_connect;
+  grpc_endpoint **endpoint;
 } async_connect;
 
-static void async_connect_cleanup(async_connect *ac) {
+static void async_connect_unlock_and_cleanup(async_connect *ac) {
   int done = (--ac->refs == 0);
   gpr_mu_unlock(&ac->mu);
   if (done) {
+    if (ac->socket != NULL) grpc_winsocket_destroy(ac->socket);
     gpr_mu_destroy(&ac->mu);
+    gpr_free(ac->addr_name);
     gpr_free(ac);
   }
 }
 
-static void on_alarm(void *acp, int success) {
+static void on_alarm(grpc_exec_ctx *exec_ctx, void *acp, int occured) {
   async_connect *ac = acp;
   gpr_mu_lock(&ac->mu);
-  if (ac->socket != NULL && success) {
+  /* If the alarm didn't occur, it got cancelled. */
+  if (ac->socket != NULL && occured) {
     grpc_winsocket_shutdown(ac->socket);
   }
-  async_connect_cleanup(ac);
+  async_connect_unlock_and_cleanup(ac);
 }
 
-static void on_connect(void *acp, int success) {
+static void on_connect(grpc_exec_ctx *exec_ctx, void *acp, int from_iocp) {
   async_connect *ac = acp;
   SOCKET sock = ac->socket->socket;
-  grpc_endpoint *ep = NULL;
+  grpc_endpoint **ep = ac->endpoint;
   grpc_winsocket_callback_info *info = &ac->socket->write_info;
-  void(*cb)(void *arg, grpc_endpoint *tcp) = ac->cb;
-  void *cb_arg = ac->cb_arg;
+  grpc_closure *on_done = ac->on_done;
 
-  grpc_alarm_cancel(&ac->alarm);
+  grpc_timer_cancel(exec_ctx, &ac->alarm);
 
-  if (success) {
+  gpr_mu_lock(&ac->mu);
+
+  if (from_iocp) {
     DWORD transfered_bytes = 0;
     DWORD flags;
     BOOL wsa_success = WSAGetOverlappedResult(sock, &info->overlapped,
-                                              &transfered_bytes, FALSE,
-                                              &flags);
+                                              &transfered_bytes, FALSE, &flags);
     GPR_ASSERT(transfered_bytes == 0);
     if (!wsa_success) {
       char *utf8_message = gpr_format_message(WSAGetLastError());
       gpr_log(GPR_ERROR, "on_connect error: %s", utf8_message);
       gpr_free(utf8_message);
-      goto finish;
     } else {
-      gpr_log(GPR_DEBUG, "on_connect: connection established");
-      ep = grpc_tcp_create(ac->socket);
-      goto finish;
+      *ep = grpc_tcp_create(ac->socket, ac->addr_name);
+      ac->socket = NULL;
     }
-  } else {
-    gpr_log(GPR_ERROR, "on_connect is shutting down");
-    goto finish;
   }
 
-  abort();
-
-finish:
-  gpr_mu_lock(&ac->mu);
-  if (!ep) {
-    grpc_winsocket_orphan(ac->socket);
-  }
-  async_connect_cleanup(ac);
-  cb(cb_arg, ep);
+  async_connect_unlock_and_cleanup(ac);
+  /* If the connection was aborted, the callback was already called when
+     the deadline was met. */
+  on_done->cb(exec_ctx, on_done->cb_arg, *ep != NULL);
 }
 
-void grpc_tcp_client_connect(void(*cb)(void *arg, grpc_endpoint *tcp),
-                             void *arg, const struct sockaddr *addr,
-                             int addr_len, gpr_timespec deadline) {
+/* Tries to issue one async connection, then schedules both an IOCP
+   notification request for the connection, and one timeout alert. */
+void grpc_tcp_client_connect(grpc_exec_ctx *exec_ctx, grpc_closure *on_done,
+                             grpc_endpoint **endpoint,
+                             grpc_pollset_set *interested_parties,
+                             const struct sockaddr *addr, size_t addr_len,
+                             gpr_timespec deadline) {
   SOCKET sock = INVALID_SOCKET;
   BOOL success;
   int status;
@@ -138,6 +137,8 @@ void grpc_tcp_client_connect(void(*cb)(void *arg, grpc_endpoint *tcp),
   const char *message = NULL;
   char *utf8_message;
   grpc_winsocket_callback_info *info;
+
+  *endpoint = NULL;
 
   /* Use dualstack sockets where available. */
   if (grpc_sockaddr_to_v4mapped(addr, &addr6_v4mapped)) {
@@ -157,31 +158,33 @@ void grpc_tcp_client_connect(void(*cb)(void *arg, grpc_endpoint *tcp),
     goto failure;
   }
 
-  status = WSAIoctl(sock, SIO_GET_EXTENSION_FUNCTION_POINTER,
-                    &guid, sizeof(guid), &ConnectEx, sizeof(ConnectEx),
-                    &ioctl_num_bytes, NULL, NULL);
+  /* Grab the function pointer for ConnectEx for that specific socket.
+     It may change depending on the interface. */
+  status =
+      WSAIoctl(sock, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid),
+               &ConnectEx, sizeof(ConnectEx), &ioctl_num_bytes, NULL, NULL);
 
   if (status != 0) {
-    message = "Unable to retreive ConnectEx pointer: %s";
+    message = "Unable to retrieve ConnectEx pointer: %s";
     goto failure;
   }
 
   grpc_sockaddr_make_wildcard6(0, &local_address);
 
-  status = bind(sock, (struct sockaddr *) &local_address,
-                sizeof(local_address));
+  status = bind(sock, (struct sockaddr *)&local_address, sizeof(local_address));
   if (status != 0) {
     message = "Unable to bind socket: %s";
     goto failure;
   }
 
-  socket = grpc_winsocket_create(sock);
+  socket = grpc_winsocket_create(sock, "client");
   info = &socket->write_info;
-  success = ConnectEx(sock, addr, addr_len, NULL, 0, NULL, &info->overlapped);
+  success =
+      ConnectEx(sock, addr, (int)addr_len, NULL, 0, NULL, &info->overlapped);
 
-  if (success) {
-    gpr_log(GPR_DEBUG, "connected immediately - but we still go to sleep");
-  } else {
+  /* It wouldn't be unusual to get a success immediately. But we'll still get
+     an IOCP notification, so let's ignore it. */
+  if (!success) {
     int error = WSAGetLastError();
     if (error != ERROR_IO_PENDING) {
       message = "ConnectEx failed: %s";
@@ -189,28 +192,30 @@ void grpc_tcp_client_connect(void(*cb)(void *arg, grpc_endpoint *tcp),
     }
   }
 
-  gpr_log(GPR_DEBUG, "grpc_tcp_client_connect: connection pending");
   ac = gpr_malloc(sizeof(async_connect));
-  ac->cb = cb;
-  ac->cb_arg = arg;
+  ac->on_done = on_done;
   ac->socket = socket;
   gpr_mu_init(&ac->mu);
   ac->refs = 2;
+  ac->addr_name = grpc_sockaddr_to_uri(addr);
+  ac->endpoint = endpoint;
+  grpc_closure_init(&ac->on_connect, on_connect, ac);
 
-  grpc_alarm_init(&ac->alarm, deadline, on_alarm, ac, gpr_now());
-  grpc_socket_notify_on_write(socket, on_connect, ac);
+  grpc_timer_init(exec_ctx, &ac->alarm, deadline, on_alarm, ac,
+                  gpr_now(GPR_CLOCK_MONOTONIC));
+  grpc_socket_notify_on_write(exec_ctx, socket, &ac->on_connect);
   return;
 
 failure:
   utf8_message = gpr_format_message(WSAGetLastError());
   gpr_log(GPR_ERROR, message, utf8_message);
   gpr_free(utf8_message);
-  if (socket) {
-    grpc_winsocket_orphan(socket);
+  if (socket != NULL) {
+    grpc_winsocket_destroy(socket);
   } else if (sock != INVALID_SOCKET) {
     closesocket(sock);
   }
-  cb(arg, NULL);
+  grpc_exec_ctx_enqueue(exec_ctx, on_done, 0);
 }
 
-#endif  /* GPR_WINSOCK_SOCKET */
+#endif /* GPR_WINSOCK_SOCKET */

@@ -37,32 +37,24 @@
 
 #include "src/core/support/string.h"
 #include <grpc/byte_buffer.h>
+#include <grpc/support/string_util.h>
 
 static void addhdr(gpr_strvec *buf, grpc_event *ev) {
   char *tmp;
-  gpr_asprintf(&tmp, "tag:%p call:%p", ev->tag, (void *)ev->call);
+  gpr_asprintf(&tmp, "tag:%p", ev->tag);
   gpr_strvec_add(buf, tmp);
 }
 
-static const char *errstr(grpc_op_error err) {
-  switch (err) {
-    case GRPC_OP_OK:
-      return "OK";
-    case GRPC_OP_ERROR:
-      return "ERROR";
-  }
-  return "UNKNOWN_UNKNOWN";
-}
+static const char *errstr(int success) { return success ? "OK" : "ERROR"; }
 
-static void adderr(gpr_strvec *buf, grpc_op_error err) {
+static void adderr(gpr_strvec *buf, int success) {
   char *tmp;
-  gpr_asprintf(&tmp, " err=%s", errstr(err));
+  gpr_asprintf(&tmp, " %s", errstr(success));
   gpr_strvec_add(buf, tmp);
 }
 
 char *grpc_event_string(grpc_event *ev) {
   char *out;
-  char *tmp;
   gpr_strvec buf;
 
   if (ev == NULL) return gpr_strdup("null");
@@ -70,64 +62,16 @@ char *grpc_event_string(grpc_event *ev) {
   gpr_strvec_init(&buf);
 
   switch (ev->type) {
-    case GRPC_SERVER_SHUTDOWN:
-      gpr_strvec_add(&buf, gpr_strdup("SERVER_SHUTDOWN"));
+    case GRPC_QUEUE_TIMEOUT:
+      gpr_strvec_add(&buf, gpr_strdup("QUEUE_TIMEOUT"));
       break;
     case GRPC_QUEUE_SHUTDOWN:
       gpr_strvec_add(&buf, gpr_strdup("QUEUE_SHUTDOWN"));
       break;
-    case GRPC_READ:
-      gpr_strvec_add(&buf, gpr_strdup("READ: "));
-      addhdr(&buf, ev);
-      if (ev->data.read) {
-        gpr_asprintf(&tmp, " %d bytes",
-                     (int)grpc_byte_buffer_length(ev->data.read));
-        gpr_strvec_add(&buf, tmp);
-      } else {
-        gpr_strvec_add(&buf, gpr_strdup(" end-of-stream"));
-      }
-      break;
     case GRPC_OP_COMPLETE:
       gpr_strvec_add(&buf, gpr_strdup("OP_COMPLETE: "));
       addhdr(&buf, ev);
-      adderr(&buf, ev->data.op_complete);
-      break;
-    case GRPC_WRITE_ACCEPTED:
-      gpr_strvec_add(&buf, gpr_strdup("WRITE_ACCEPTED: "));
-      addhdr(&buf, ev);
-      adderr(&buf, ev->data.write_accepted);
-      break;
-    case GRPC_FINISH_ACCEPTED:
-      gpr_strvec_add(&buf, gpr_strdup("FINISH_ACCEPTED: "));
-      addhdr(&buf, ev);
-      adderr(&buf, ev->data.write_accepted);
-      break;
-    case GRPC_CLIENT_METADATA_READ:
-      gpr_strvec_add(&buf, gpr_strdup("CLIENT_METADATA_READ: "));
-      addhdr(&buf, ev);
-      gpr_asprintf(&tmp, " %d elements",
-                   (int)ev->data.client_metadata_read.count);
-      gpr_strvec_add(&buf, tmp);
-      break;
-    case GRPC_FINISHED:
-      gpr_strvec_add(&buf, gpr_strdup("FINISHED: "));
-      addhdr(&buf, ev);
-      gpr_asprintf(&tmp, " status=%d details='%s' %d metadata elements",
-                   ev->data.finished.status, ev->data.finished.details,
-                   (int)ev->data.finished.metadata_count);
-      gpr_strvec_add(&buf, tmp);
-      break;
-    case GRPC_SERVER_RPC_NEW:
-      gpr_strvec_add(&buf, gpr_strdup("SERVER_RPC_NEW: "));
-      addhdr(&buf, ev);
-      gpr_asprintf(&tmp, " method='%s' host='%s' %d metadata elements",
-                   ev->data.server_rpc_new.method, ev->data.server_rpc_new.host,
-                   (int)ev->data.server_rpc_new.metadata_count);
-      gpr_strvec_add(&buf, tmp);
-      break;
-    case GRPC_COMPLETION_DO_NOT_USE:
-      gpr_strvec_add(&buf, gpr_strdup("DO_NOT_USE (this is a bug)"));
-      addhdr(&buf, ev);
+      adderr(&buf, ev->success);
       break;
   }
 

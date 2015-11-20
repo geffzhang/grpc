@@ -31,11 +31,16 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_IOMGR_SOCKADDR_WIN32_H_
-#define __GRPC_INTERNAL_IOMGR_SOCKADDR_WIN32_H_
+#ifndef GRPC_INTERNAL_CORE_IOMGR_SOCKADDR_WIN32_H
+#define GRPC_INTERNAL_CORE_IOMGR_SOCKADDR_WIN32_H
 
-#include <ws2tcpip.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <mswsock.h>
 
-#endif  /* __GRPC_INTERNAL_IOMGR_SOCKADDR_WIN32_H_ */
+#ifdef __MINGW32__
+/* mingw seems to be missing that definition. */
+const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
+#endif
+
+#endif /* GRPC_INTERNAL_CORE_IOMGR_SOCKADDR_WIN32_H */

@@ -40,12 +40,16 @@
 #include <sys/types.h>
 #include <string.h>
 
+#include "src/core/iomgr/executor.h"
 #include "src/core/iomgr/iomgr_internal.h"
 #include "src/core/iomgr/sockaddr_utils.h"
+#include "src/core/support/block_annotate.h"
 #include "src/core/support/string.h"
 #include <grpc/support/alloc.h>
 #include <grpc/support/host_port.h>
 #include <grpc/support/log.h>
+#include <grpc/support/log_win32.h>
+#include <grpc/support/string_util.h>
 #include <grpc/support/thd.h>
 #include <grpc/support/time.h>
 
@@ -53,6 +57,7 @@ typedef struct {
   char *name;
   char *default_port;
   grpc_resolve_cb cb;
+  grpc_closure request_closure;
   void *arg;
 } request;
 
@@ -65,7 +70,6 @@ grpc_resolved_addresses *grpc_blocking_resolve_address(
   int s;
   size_t i;
   grpc_resolved_addresses *addrs = NULL;
-  const gpr_timespec start_time = gpr_now();
 
   /* parse name, splitting it into host and port parts */
   gpr_split_host_port(name, &host, &port);
@@ -87,9 +91,13 @@ grpc_resolved_addresses *grpc_blocking_resolve_address(
   hints.ai_socktype = SOCK_STREAM; /* stream socket */
   hints.ai_flags = AI_PASSIVE;     /* for wildcard IP address */
 
+  GRPC_SCHEDULING_START_BLOCKING_REGION;
   s = getaddrinfo(host, port, &hints, &result);
+  GRPC_SCHEDULING_END_BLOCKING_REGION;
   if (s != 0) {
-    gpr_log(GPR_ERROR, "getaddrinfo: %s", gai_strerror(s));
+    char *error_message = gpr_format_message(s);
+    gpr_log(GPR_ERROR, "getaddrinfo: %s", error_message);
+    gpr_free(error_message);
     goto done;
   }
 
@@ -107,18 +115,11 @@ grpc_resolved_addresses *grpc_blocking_resolve_address(
     i++;
   }
 
-  /* Temporary logging, to help identify flakiness in dualstack_socket_test. */
   {
-    const gpr_timespec delay = gpr_time_sub(gpr_now(), start_time);
-    const int delay_ms =
-        delay.tv_sec * GPR_MS_PER_SEC + delay.tv_nsec / GPR_NS_PER_MS;
-    gpr_log(GPR_INFO, "logspam: getaddrinfo(%s, %s) resolved %d addrs in %dms:",
-            host, port, addrs->naddrs, delay_ms);
     for (i = 0; i < addrs->naddrs; i++) {
       char *buf;
       grpc_sockaddr_to_string(&buf, (struct sockaddr *)&addrs->addrs[i].addr,
                               0);
-      gpr_log(GPR_INFO, "logspam:   [%d] %s", i, buf);
       gpr_free(buf);
     }
   }
@@ -132,8 +133,9 @@ done:
   return addrs;
 }
 
-/* Thread function to asynch-ify grpc_blocking_resolve_address */
-static void do_request(void *rp) {
+/* Callback to be passed to grpc_executor to asynch-ify
+ * grpc_blocking_resolve_address */
+static void do_request_thread(grpc_exec_ctx *exec_ctx, void *rp, int success) {
   request *r = rp;
   grpc_resolved_addresses *resolved =
       grpc_blocking_resolve_address(r->name, r->default_port);
@@ -141,9 +143,8 @@ static void do_request(void *rp) {
   grpc_resolve_cb cb = r->cb;
   gpr_free(r->name);
   gpr_free(r->default_port);
+  cb(exec_ctx, arg, resolved);
   gpr_free(r);
-  cb(arg, resolved);
-  grpc_iomgr_unref();
 }
 
 void grpc_resolved_addresses_destroy(grpc_resolved_addresses *addrs) {
@@ -154,13 +155,12 @@ void grpc_resolved_addresses_destroy(grpc_resolved_addresses *addrs) {
 void grpc_resolve_address(const char *name, const char *default_port,
                           grpc_resolve_cb cb, void *arg) {
   request *r = gpr_malloc(sizeof(request));
-  gpr_thd_id id;
-  grpc_iomgr_ref();
+  grpc_closure_init(&r->request_closure, do_request_thread, r);
   r->name = gpr_strdup(name);
   r->default_port = gpr_strdup(default_port);
   r->cb = cb;
   r->arg = arg;
-  gpr_thd_new(&id, do_request, r, NULL);
+  grpc_executor_enqueue(&r->request_closure, 1);
 }
 
 #endif

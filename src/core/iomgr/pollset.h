@@ -31,11 +31,13 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_IOMGR_POLLSET_H_
-#define __GRPC_INTERNAL_IOMGR_POLLSET_H_
+#ifndef GRPC_INTERNAL_CORE_IOMGR_POLLSET_H
+#define GRPC_INTERNAL_CORE_IOMGR_POLLSET_H
 
 #include <grpc/support/port_platform.h>
 #include <grpc/support/time.h>
+
+#define GRPC_POLLSET_KICK_BROADCAST ((grpc_pollset_worker *)1)
 
 /* A grpc_pollset is a set of file descriptors that a higher level item is
    interested in. For example:
@@ -52,23 +54,42 @@
 #include "src/core/iomgr/pollset_windows.h"
 #endif
 
-
 void grpc_pollset_init(grpc_pollset *pollset);
-void grpc_pollset_shutdown(grpc_pollset *pollset,
-                           void (*shutdown_done)(void *arg),
-                           void *shutdown_done_arg);
+/* Begin shutting down the pollset, and call closure when done.
+ * GRPC_POLLSET_MU(pollset) must be held */
+void grpc_pollset_shutdown(grpc_exec_ctx *exec_ctx, grpc_pollset *pollset,
+                           grpc_closure *closure);
+/** Reset the pollset to its initial state (perhaps with some cached objects);
+ *  must have been previously shutdown */
+void grpc_pollset_reset(grpc_pollset *pollset);
 void grpc_pollset_destroy(grpc_pollset *pollset);
-
 
 /* Do some work on a pollset.
    May involve invoking asynchronous callbacks, or actually polling file
    descriptors.
    Requires GRPC_POLLSET_MU(pollset) locked.
-   May unlock GRPC_POLLSET_MU(pollset) during its execution. */
-int grpc_pollset_work(grpc_pollset *pollset, gpr_timespec deadline);
+   May unlock GRPC_POLLSET_MU(pollset) during its execution.
 
-/* Break a pollset out of polling work
-   Requires GRPC_POLLSET_MU(pollset) locked. */
-void grpc_pollset_kick(grpc_pollset *pollset);
+   worker is a (platform-specific) handle that can be used to wake up
+   from grpc_pollset_work before any events are received and before the timeout
+   has expired. It is both initialized and destroyed by grpc_pollset_work.
+   Initialization of worker is guaranteed to occur BEFORE the
+   GRPC_POLLSET_MU(pollset) is released for the first time by
+   grpc_pollset_work, and it is guaranteed that GRPC_POLLSET_MU(pollset) will
+   not be released by grpc_pollset_work AFTER worker has been destroyed.
 
-#endif /* __GRPC_INTERNAL_IOMGR_POLLSET_H_ */
+   Tries not to block past deadline.
+   May call grpc_closure_list_run on grpc_closure_list, without holding the
+   pollset
+   lock */
+void grpc_pollset_work(grpc_exec_ctx *exec_ctx, grpc_pollset *pollset,
+                       grpc_pollset_worker *worker, gpr_timespec now,
+                       gpr_timespec deadline);
+
+/* Break one polling thread out of polling work for this pollset.
+   If specific_worker is GRPC_POLLSET_KICK_BROADCAST, kick ALL the workers.
+   Otherwise, if specific_worker is non-NULL, then kick that worker. */
+void grpc_pollset_kick(grpc_pollset *pollset,
+                       grpc_pollset_worker *specific_worker);
+
+#endif /* GRPC_INTERNAL_CORE_IOMGR_POLLSET_H */

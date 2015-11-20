@@ -33,7 +33,15 @@
 
 'use strict';
 
-var _ = require('underscore');
+var path = require('path');
+
+var SSL_ROOTS_PATH = path.resolve(__dirname, '..', '..', 'etc', 'roots.pem');
+
+if (!process.env.GRPC_DEFAULT_SSL_ROOTS_FILE_PATH) {
+  process.env.GRPC_DEFAULT_SSL_ROOTS_FILE_PATH = SSL_ROOTS_PATH;
+}
+
+var _ = require('lodash');
 
 var ProtoBuf = require('protobufjs');
 
@@ -41,14 +49,16 @@ var client = require('./src/client.js');
 
 var server = require('./src/server.js');
 
-var grpc = require('bindings')('grpc');
+var Metadata = require('./src/metadata.js');
+
+var grpc = require('bindings')('grpc_node');
 
 /**
  * Load a gRPC object from an existing ProtoBuf.Reflect object.
  * @param {ProtoBuf.Reflect.Namespace} value The ProtoBuf object to load.
  * @return {Object<string, *>} The resulting gRPC object
  */
-function loadObject(value) {
+exports.loadObject = function loadObject(value) {
   var result = {};
   if (value.className === 'Namespace') {
     _.each(value.children, function(child) {
@@ -56,88 +66,92 @@ function loadObject(value) {
     });
     return result;
   } else if (value.className === 'Service') {
-    return client.makeClientConstructor(value);
+    return client.makeProtobufClientConstructor(value);
   } else if (value.className === 'Message' || value.className === 'Enum') {
     return value.build();
   } else {
     return value;
   }
-}
+};
+
+var loadObject = exports.loadObject;
 
 /**
  * Load a gRPC object from a .proto file.
  * @param {string} filename The file to load
+ * @param {string=} format The file format to expect. Must be either 'proto' or
+ *     'json'. Defaults to 'proto'
  * @return {Object<string, *>} The resulting gRPC object
  */
-function load(filename) {
-  var builder = ProtoBuf.loadProtoFile(filename);
-
+exports.load = function load(filename, format) {
+  if (!format) {
+    format = 'proto';
+  }
+  var builder;
+  switch(format) {
+    case 'proto':
+    builder = ProtoBuf.loadProtoFile(filename);
+    break;
+    case 'json':
+    builder = ProtoBuf.loadJsonFile(filename);
+    break;
+    default:
+    throw new Error('Unrecognized format "' + format + '"');
+  }
   return loadObject(builder.ns);
-}
+};
 
 /**
- * Get a function that a client can use to update metadata with authentication
- * information from a Google Auth credential object, which comes from the
- * google-auth-library.
- * @param {Object} credential The credential object to use
- * @return {function(Object, callback)} Metadata updater function
+ * @see module:src/server.Server
  */
-function getGoogleAuthDelegate(credential) {
-  /**
-   * Update a metadata object with authentication information.
-   * @param {Object} metadata Metadata object
-   * @param {function(Error, Object)} callback
-   */
-  return function updateMetadata(metadata, callback) {
-    metadata = _.clone(metadata);
-    if (metadata.Authorization) {
-      metadata.Authorization = _.clone(metadata.Authorization);
-    } else {
-      metadata.Authorization = [];
-    }
-    credential.getAccessToken(function(err, token) {
-      if (err) {
-        callback(err);
-        return;
-      }
-      metadata.Authorization.push('Bearer ' + token);
-      callback(null, metadata);
-    });
-  };
-}
+exports.Server = server.Server;
 
 /**
- * See docs for loadObject
+ * @see module:src/metadata
  */
-exports.loadObject = loadObject;
-
-/**
- * See docs for load
- */
-exports.load = load;
-
-/**
- * See docs for server.makeServerConstructor
- */
-exports.buildServer = server.makeServerConstructor;
+exports.Metadata = Metadata;
 
 /**
  * Status name to code number mapping
  */
 exports.status = grpc.status;
+
+/**
+ * Propagate flag name to number mapping
+ */
+exports.propagate = grpc.propagate;
+
 /**
  * Call error name to code number mapping
  */
 exports.callError = grpc.callError;
 
 /**
+ * Write flag name to code number mapping
+ */
+exports.writeFlags = grpc.writeFlags;
+
+/**
  * Credentials factories
  */
-exports.Credentials = grpc.Credentials;
+exports.credentials = require('./src/credentials.js');
 
 /**
  * ServerCredentials factories
  */
 exports.ServerCredentials = grpc.ServerCredentials;
 
-exports.getGoogleAuthDelegate = getGoogleAuthDelegate;
+/**
+ * @see module:src/client.makeClientConstructor
+ */
+exports.makeGenericClientConstructor = client.makeClientConstructor;
+
+/**
+ * @see module:src/client.getClientChannel
+ */
+exports.getClientChannel = client.getClientChannel;
+
+/**
+ * @see module:src/client.waitForClientReady
+ */
+exports.waitForClientReady = client.waitForClientReady;

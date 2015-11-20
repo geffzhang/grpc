@@ -31,185 +31,84 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_SECURITY_SECURITY_CONTEXT_H__
-#define __GRPC_INTERNAL_SECURITY_SECURITY_CONTEXT_H__
+#ifndef GRPC_INTERNAL_CORE_SECURITY_SECURITY_CONTEXT_H
+#define GRPC_INTERNAL_CORE_SECURITY_SECURITY_CONTEXT_H
 
-#include <grpc/grpc_security.h>
-#include "src/core/iomgr/endpoint.h"
+#include "src/core/iomgr/pollset.h"
 #include "src/core/security/credentials.h"
-#include "src/core/tsi/transport_security_interface.h"
 
-/* --- status enum. --- */
+/* --- grpc_auth_context ---
 
-typedef enum {
-  GRPC_SECURITY_OK = 0,
-  GRPC_SECURITY_PENDING,
-  GRPC_SECURITY_ERROR
-} grpc_security_status;
+   High level authentication context object. Can optionally be chained. */
 
-/* --- URL schemes. --- */
-
-#define GRPC_SSL_URL_SCHEME "https"
-#define GRPC_FAKE_SECURITY_URL_SCHEME "http+fake_security"
-
-/* --- security_context object. ---
-
-    A security context object represents away to configure the underlying
-    transport security mechanism and check the resulting trusted peer.  */
-
-typedef struct grpc_security_context grpc_security_context;
-
-#define GRPC_SECURITY_CONTEXT_ARG "grpc.security_context"
-
-typedef void (*grpc_security_check_cb)(void *user_data,
-                                       grpc_security_status status);
+/* Property names are always NULL terminated. */
 
 typedef struct {
-  void (*destroy)(grpc_security_context *ctx);
-  grpc_security_status (*create_handshaker)(grpc_security_context *ctx,
-                                            tsi_handshaker **handshaker);
-  grpc_security_status (*check_peer)(grpc_security_context *ctx, tsi_peer peer,
-                                     grpc_security_check_cb cb,
-                                     void *user_data);
-} grpc_security_context_vtable;
+  grpc_auth_property *array;
+  size_t count;
+  size_t capacity;
+} grpc_auth_property_array;
 
-struct grpc_security_context {
-  const grpc_security_context_vtable *vtable;
+struct grpc_auth_context {
+  struct grpc_auth_context *chained;
+  grpc_auth_property_array properties;
   gpr_refcount refcount;
-  int is_client_side;
-  const char *url_scheme;
+  const char *peer_identity_property_name;
+  grpc_pollset *pollset;
 };
 
-/* Increments the refcount. */
-grpc_security_context *grpc_security_context_ref(grpc_security_context *ctx);
+/* Creation. */
+grpc_auth_context *grpc_auth_context_create(grpc_auth_context *chained);
 
-/* Decrements the refcount and destroys the object if it reaches 0. */
-void grpc_security_context_unref(grpc_security_context *ctx);
+/* Refcounting. */
+#ifdef GRPC_AUTH_CONTEXT_REFCOUNT_DEBUG
+#define GRPC_AUTH_CONTEXT_REF(p, r) \
+  grpc_auth_context_ref((p), __FILE__, __LINE__, (r))
+#define GRPC_AUTH_CONTEXT_UNREF(p, r) \
+  grpc_auth_context_unref((p), __FILE__, __LINE__, (r))
+grpc_auth_context *grpc_auth_context_ref(grpc_auth_context *policy,
+                                         const char *file, int line,
+                                         const char *reason);
+void grpc_auth_context_unref(grpc_auth_context *policy, const char *file,
+                             int line, const char *reason);
+#else
+#define GRPC_AUTH_CONTEXT_REF(p, r) grpc_auth_context_ref((p))
+#define GRPC_AUTH_CONTEXT_UNREF(p, r) grpc_auth_context_unref((p))
+grpc_auth_context *grpc_auth_context_ref(grpc_auth_context *policy);
+void grpc_auth_context_unref(grpc_auth_context *policy);
+#endif
 
-/* Handshake creation. */
-grpc_security_status grpc_security_context_create_handshaker(
-    grpc_security_context *ctx, tsi_handshaker **handshaker);
+void grpc_auth_property_reset(grpc_auth_property *property);
 
-/* Check the peer.
-   Implementations can choose to check the peer either synchronously or
-   asynchronously. In the first case, a successful call will return
-   GRPC_SECURITY_OK. In the asynchronous case, the call will return
-   GRPC_SECURITY_PENDING unless an error is detected early on.
-   Ownership of the peer is transfered.
-*/
-grpc_security_status grpc_security_context_check_peer(
-    grpc_security_context *ctx, tsi_peer peer,
-    grpc_security_check_cb cb, void *user_data);
+/* --- grpc_client_security_context ---
 
-/* Util to encapsulate the context in a channel arg. */
-grpc_arg grpc_security_context_to_arg(grpc_security_context *ctx);
-
-/* Util to get the context from a channel arg. */
-grpc_security_context *grpc_security_context_from_arg(const grpc_arg *arg);
-
-/* Util to find the context from channel args. */
-grpc_security_context *grpc_find_security_context_in_args(
-    const grpc_channel_args *args);
-
-/* --- channel_security_context object. ---
-
-    A channel security context object represents away to configure the
-    underlying transport security mechanism on the client side.  */
-
-typedef struct grpc_channel_security_context grpc_channel_security_context;
-
-struct grpc_channel_security_context {
-  grpc_security_context base; /* requires is_client_side to be non 0. */
-  grpc_credentials *request_metadata_creds;
-  grpc_security_status (*check_call_host)(
-      grpc_channel_security_context *ctx, const char *host,
-      grpc_security_check_cb cb, void *user_data);
-};
-
-/* Checks that the host that will be set for a call is acceptable.
-   Implementations can choose do the check either synchronously or
-   asynchronously. In the first case, a successful call will return
-   GRPC_SECURITY_OK. In the asynchronous case, the call will return
-   GRPC_SECURITY_PENDING unless an error is detected early on. */
-grpc_security_status grpc_channel_security_context_check_call_host(
-    grpc_channel_security_context *ctx, const char *host,
-    grpc_security_check_cb cb, void *user_data);
-
-/* --- Creation security contexts. --- */
-
-/* For TESTING ONLY!
-   Creates a fake context that emulates real channel security.  */
-grpc_channel_security_context *grpc_fake_channel_security_context_create(
-    grpc_credentials *request_metadata_creds, int call_host_check_is_async);
-
-/* For TESTING ONLY!
-   Creates a fake context that emulates real server security.  */
-grpc_security_context *grpc_fake_server_security_context_create(void);
-
-/* Creates an SSL channel_security_context.
-   - request_metadata_creds is the credentials object which metadata
-     will be sent with each request. This parameter can be NULL.
-   - config is the SSL config to be used for the SSL channel establishment.
-   - is_client should be 0 for a server or a non-0 value for a client.
-   - secure_peer_name is the secure peer name that should be checked in
-     grpc_channel_security_context_check_peer. This parameter may be NULL in
-     which case the peer name will not be checked. Note that if this parameter
-     is not NULL, then, pem_root_certs should not be NULL either.
-   - ctx is a pointer on the context to be created.
-  This function returns GRPC_SECURITY_OK in case of success or a
-  specific error code otherwise.
-*/
-grpc_security_status grpc_ssl_channel_security_context_create(
-    grpc_credentials *request_metadata_creds, const grpc_ssl_config *config,
-    const char *target_name, const char *overridden_target_name,
-    grpc_channel_security_context **ctx);
-
-/* Creates an SSL server_security_context.
-   - config is the SSL config to be used for the SSL channel establishment.
-   - ctx is a pointer on the context to be created.
-  This function returns GRPC_SECURITY_OK in case of success or a
-  specific error code otherwise.
-*/
-grpc_security_status grpc_ssl_server_security_context_create(
-    const grpc_ssl_server_config *config, grpc_security_context **ctx);
-
-/* --- Creation of high level objects. --- */
-
-/* Secure client channel creation. */
-
-size_t grpc_get_default_ssl_roots(const unsigned char **pem_root_certs);
-
-grpc_channel *grpc_ssl_channel_create(grpc_credentials *ssl_creds,
-                                      grpc_credentials *request_metadata_creds,
-                                      const char *target,
-                                      const grpc_channel_args *args);
-
-grpc_channel *grpc_fake_transport_security_channel_create(
-    grpc_credentials *fake_creds, grpc_credentials *request_metadata_creds,
-    const char *target, const grpc_channel_args *args);
-
-grpc_channel *grpc_secure_channel_create_internal(
-    const char *target, const grpc_channel_args *args,
-    grpc_channel_security_context *ctx);
-
-typedef grpc_channel *(*grpc_secure_channel_factory_func)(
-    grpc_credentials *transport_security_creds,
-    grpc_credentials *request_metadata_creds, const char *target,
-    const grpc_channel_args *args);
+   Internal client-side security context. */
 
 typedef struct {
-  const char *creds_type;
-  grpc_secure_channel_factory_func factory;
-} grpc_secure_channel_factory;
+  grpc_call_credentials *creds;
+  grpc_auth_context *auth_context;
+} grpc_client_security_context;
 
-grpc_channel *grpc_secure_channel_create_with_factories(
-    const grpc_secure_channel_factory *factories, size_t num_factories,
-    grpc_credentials *creds, const char *target, const grpc_channel_args *args);
+grpc_client_security_context *grpc_client_security_context_create(void);
+void grpc_client_security_context_destroy(void *ctx);
 
-/* Secure server creation. */
+/* --- grpc_server_security_context ---
 
-grpc_server *grpc_secure_server_create_internal(grpc_completion_queue *cq,
-                                                const grpc_channel_args *args,
-                                                grpc_security_context *ctx);
+   Internal server-side security context. */
 
-#endif /* __GRPC_INTERNAL_SECURITY_SECURITY_CONTEXT_H__ */
+typedef struct {
+  grpc_auth_context *auth_context;
+} grpc_server_security_context;
+
+grpc_server_security_context *grpc_server_security_context_create(void);
+void grpc_server_security_context_destroy(void *ctx);
+
+/* --- Channel args for auth context --- */
+#define GRPC_AUTH_CONTEXT_ARG "grpc.auth_context"
+
+grpc_arg grpc_auth_context_to_arg(grpc_auth_context *c);
+grpc_auth_context *grpc_auth_context_from_arg(const grpc_arg *arg);
+grpc_auth_context *grpc_find_auth_context_in_args(
+    const grpc_channel_args *args);
+
+#endif /* GRPC_INTERNAL_CORE_SECURITY_SECURITY_CONTEXT_H */

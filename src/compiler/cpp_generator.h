@@ -31,31 +31,51 @@
  *
  */
 
-#ifndef NET_GRPC_COMPILER_CPP_GENERATOR_H_
-#define NET_GRPC_COMPILER_CPP_GENERATOR_H_
+#ifndef GRPC_INTERNAL_COMPILER_CPP_GENERATOR_H
+#define GRPC_INTERNAL_COMPILER_CPP_GENERATOR_H
 
-#include <string>
-
-namespace google {
-namespace protobuf {
-class FileDescriptor;
-}  // namespace protobuf
-}  // namespace google
+#include "src/compiler/config.h"
 
 namespace grpc_cpp_generator {
 
+// Contains all the parameters that are parsed from the command line.
+struct Parameters {
+  // Puts the service into a namespace
+  grpc::string services_namespace;
+};
+
+// Return the prologue of the generated header file.
+grpc::string GetHeaderPrologue(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
+
 // Return the includes needed for generated header file.
-std::string GetHeaderIncludes(const google::protobuf::FileDescriptor *file);
+grpc::string GetHeaderIncludes(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
 
 // Return the includes needed for generated source file.
-std::string GetSourceIncludes();
+grpc::string GetSourceIncludes(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
+
+// Return the epilogue of the generated header file.
+grpc::string GetHeaderEpilogue(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
+
+// Return the prologue of the generated source file.
+grpc::string GetSourcePrologue(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
 
 // Return the services for generated header file.
-std::string GetHeaderServices(const google::protobuf::FileDescriptor *file);
+grpc::string GetHeaderServices(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
 
 // Return the services for generated source file.
-std::string GetSourceServices(const google::protobuf::FileDescriptor *file);
+grpc::string GetSourceServices(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
+
+// Return the epilogue of the generated source file.
+grpc::string GetSourceEpilogue(const grpc::protobuf::FileDescriptor *file,
+                               const Parameters &params);
 
 }  // namespace grpc_cpp_generator
 
-#endif  // NET_GRPC_COMPILER_CPP_GENERATOR_H_
+#endif  // GRPC_INTERNAL_COMPILER_CPP_GENERATOR_H

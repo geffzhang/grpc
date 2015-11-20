@@ -37,32 +37,58 @@
 #include <grpc/support/log.h>
 #include <grpc++/impl/service_type.h>
 #include <grpc++/server.h>
-#include "src/cpp/server/thread_pool.h"
+#include "src/cpp/server/thread_pool_interface.h"
+#include "src/cpp/server/fixed_size_thread_pool.h"
 
 namespace grpc {
 
-ServerBuilder::ServerBuilder() : thread_pool_(nullptr) {}
+ServerBuilder::ServerBuilder()
+    : max_message_size_(-1), generic_service_(nullptr), thread_pool_(nullptr) {
+  grpc_compression_options_init(&compression_options_);
+}
+
+std::unique_ptr<ServerCompletionQueue> ServerBuilder::AddCompletionQueue() {
+  ServerCompletionQueue* cq = new ServerCompletionQueue();
+  cqs_.push_back(cq);
+  return std::unique_ptr<ServerCompletionQueue>(cq);
+}
 
 void ServerBuilder::RegisterService(SynchronousService* service) {
-  services_.push_back(service->service());
+  services_.emplace_back(new NamedService<RpcService>(service->service()));
 }
 
 void ServerBuilder::RegisterAsyncService(AsynchronousService* service) {
-  async_services_.push_back(service);
+  async_services_.emplace_back(new NamedService<AsynchronousService>(service));
 }
 
-void ServerBuilder::AddPort(const grpc::string& addr) {
-  ports_.push_back(addr);
+void ServerBuilder::RegisterService(const grpc::string& addr,
+                                    SynchronousService* service) {
+  services_.emplace_back(
+      new NamedService<RpcService>(addr, service->service()));
 }
 
-void ServerBuilder::SetCredentials(
-    const std::shared_ptr<ServerCredentials>& creds) {
-  GPR_ASSERT(!creds_);
-  creds_ = creds;
+void ServerBuilder::RegisterAsyncService(const grpc::string& addr,
+                                         AsynchronousService* service) {
+  async_services_.emplace_back(
+      new NamedService<AsynchronousService>(addr, service));
 }
 
-void ServerBuilder::SetThreadPool(ThreadPoolInterface* thread_pool) {
-  thread_pool_ = thread_pool;
+void ServerBuilder::RegisterAsyncGenericService(AsyncGenericService* service) {
+  if (generic_service_) {
+    gpr_log(GPR_ERROR,
+            "Adding multiple AsyncGenericService is unsupported for now. "
+            "Dropping the service %p",
+            service);
+    return;
+  }
+  generic_service_ = service;
+}
+
+void ServerBuilder::AddListeningPort(const grpc::string& addr,
+                                     std::shared_ptr<ServerCredentials> creds,
+                                     int* selected_port) {
+  Port port = {addr, creds, selected_port};
+  ports_.push_back(port);
 }
 
 std::unique_ptr<Server> ServerBuilder::BuildAndStart() {
@@ -71,30 +97,42 @@ std::unique_ptr<Server> ServerBuilder::BuildAndStart() {
     gpr_log(GPR_ERROR, "Mixing async and sync services is unsupported for now");
     return nullptr;
   }
-  if (!thread_pool_ && services_.size()) {
-    int cores = gpr_cpu_num_cores();
-    if (!cores) cores = 4;
-    thread_pool_ = new ThreadPool(cores);
+  if (!thread_pool_ && !services_.empty()) {
+    thread_pool_ = CreateDefaultThreadPool();
     thread_pool_owned = true;
   }
-  std::unique_ptr<Server> server(
-      new Server(thread_pool_, thread_pool_owned, creds_.get()));
-  for (auto* service : services_) {
-    if (!server->RegisterService(service)) {
+  std::unique_ptr<Server> server(new Server(thread_pool_, thread_pool_owned,
+                                            max_message_size_,
+                                            compression_options_));
+  for (auto cq = cqs_.begin(); cq != cqs_.end(); ++cq) {
+    grpc_server_register_completion_queue(server->server_, (*cq)->cq(),
+                                          nullptr);
+  }
+  for (auto service = services_.begin(); service != services_.end();
+       service++) {
+    if (!server->RegisterService((*service)->host.get(), (*service)->service)) {
       return nullptr;
     }
   }
-  for (auto* service : async_services_) {
-    if (!server->RegisterAsyncService(service)) {
+  for (auto service = async_services_.begin(); service != async_services_.end();
+       service++) {
+    if (!server->RegisterAsyncService((*service)->host.get(),
+                                      (*service)->service)) {
       return nullptr;
     }
   }
-  for (auto& port : ports_) {
-    if (!server->AddPort(port)) {
-      return nullptr;
+  if (generic_service_) {
+    server->RegisterAsyncGenericService(generic_service_);
+  }
+  for (auto port = ports_.begin(); port != ports_.end(); port++) {
+    int r = server->AddListeningPort(port->addr, port->creds.get());
+    if (!r) return nullptr;
+    if (port->selected_port != nullptr) {
+      *port->selected_port = r;
     }
   }
-  if (!server->Start()) {
+  auto cqs_data = cqs_.empty() ? nullptr : &cqs_[0];
+  if (!server->Start(cqs_data, cqs_.size())) {
     return nullptr;
   }
   return server;

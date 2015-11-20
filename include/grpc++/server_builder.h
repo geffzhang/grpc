@@ -31,61 +31,125 @@
  *
  */
 
-#ifndef __GRPCPP_SERVER_BUILDER_H__
-#define __GRPCPP_SERVER_BUILDER_H__
+#ifndef GRPCXX_SERVER_BUILDER_H
+#define GRPCXX_SERVER_BUILDER_H
 
 #include <memory>
 #include <vector>
 
-#include <grpc++/config.h>
+#include <grpc/compression.h>
+#include <grpc++/support/config.h>
 
 namespace grpc {
 
+class AsyncGenericService;
 class AsynchronousService;
 class CompletionQueue;
 class RpcService;
 class Server;
+class ServerCompletionQueue;
 class ServerCredentials;
 class SynchronousService;
 class ThreadPoolInterface;
 
+/// A builder class for the creation and startup of \a grpc::Server instances.
 class ServerBuilder {
  public:
   ServerBuilder();
 
-  // Register a service. This call does not take ownership of the service.
-  // The service must exist for the lifetime of the Server instance returned by
-  // BuildAndStart().
+  /// Register a service. This call does not take ownership of the service.
+  /// The service must exist for the lifetime of the \a Server instance returned
+  /// by \a BuildAndStart().
+  /// Matches requests with any :authority
   void RegisterService(SynchronousService* service);
 
-  // Register an asynchronous service. New calls will be delevered to cq.
-  // This call does not take ownership of the service or completion queue.
-  // The service and completion queuemust exist for the lifetime of the Server
-  // instance returned by BuildAndStart().
+  /// Register an asynchronous service.
+  /// This call does not take ownership of the service or completion queue.
+  /// The service and completion queuemust exist for the lifetime of the \a
+  /// Server instance returned by \a BuildAndStart().
+  /// Matches requests with any :authority
   void RegisterAsyncService(AsynchronousService* service);
 
-  // Add a listening port. Can be called multiple times.
-  void AddPort(const grpc::string& addr);
+  /// Register a generic service.
+  /// Matches requests with any :authority
+  void RegisterAsyncGenericService(AsyncGenericService* service);
 
-  // Set a ServerCredentials. Can only be called once.
-  // TODO(yangg) move this to be part of AddPort
-  void SetCredentials(const std::shared_ptr<ServerCredentials>& creds);
+  /// Register a service. This call does not take ownership of the service.
+  /// The service must exist for the lifetime of the \a Server instance returned
+  /// by BuildAndStart().
+  /// Only matches requests with :authority \a host
+  void RegisterService(const grpc::string& host, SynchronousService* service);
 
-  // Set the thread pool used for running appliation rpc handlers.
-  // Does not take ownership.
-  void SetThreadPool(ThreadPoolInterface* thread_pool);
+  /// Register an asynchronous service.
+  /// This call does not take ownership of the service or completion queue.
+  /// The service and completion queuemust exist for the lifetime of the \a
+  /// Server instance returned by \a BuildAndStart().
+  /// Only matches requests with :authority equal to \a host
+  void RegisterAsyncService(const grpc::string& host,
+                            AsynchronousService* service);
 
-  // Return a running server which is ready for processing rpcs.
+  /// Set max message size in bytes.
+  void SetMaxMessageSize(int max_message_size) {
+    max_message_size_ = max_message_size;
+  }
+
+  /// Set the compression options to be used by the server.
+  void SetCompressionOptions(const grpc_compression_options& options) {
+    compression_options_ = options;
+  }
+
+  /// Tries to bind \a server to the given \a addr.
+  ///
+  /// It can be invoked multiple times.
+  ///
+  /// \param addr The address to try to bind to the server (eg, localhost:1234,
+  /// 192.168.1.1:31416, [::1]:27182, etc.).
+  /// \params creds The credentials associated with the server.
+  /// \param selected_port[out] Upon success, updated to contain the port
+  /// number. \a nullptr otherwise.
+  ///
+  // TODO(dgq): the "port" part seems to be a misnomer.
+  void AddListeningPort(const grpc::string& addr,
+                        std::shared_ptr<ServerCredentials> creds,
+                        int* selected_port = nullptr);
+
+  /// Add a completion queue for handling asynchronous services
+  /// Caller is required to keep this completion queue live until
+  /// the server is destroyed.
+  std::unique_ptr<ServerCompletionQueue> AddCompletionQueue();
+
+  /// Return a running server which is ready for processing calls.
   std::unique_ptr<Server> BuildAndStart();
 
  private:
-  std::vector<RpcService*> services_;
-  std::vector<AsynchronousService*> async_services_;
-  std::vector<grpc::string> ports_;
+  struct Port {
+    grpc::string addr;
+    std::shared_ptr<ServerCredentials> creds;
+    int* selected_port;
+  };
+
+  typedef std::unique_ptr<grpc::string> HostString;
+  template <class T>
+  struct NamedService {
+    explicit NamedService(T* s) : service(s) {}
+    NamedService(const grpc::string& h, T* s)
+        : host(new grpc::string(h)), service(s) {}
+    HostString host;
+    T* service;
+  };
+
+  int max_message_size_;
+  grpc_compression_options compression_options_;
+  std::vector<std::unique_ptr<NamedService<RpcService>>> services_;
+  std::vector<std::unique_ptr<NamedService<AsynchronousService>>>
+      async_services_;
+  std::vector<Port> ports_;
+  std::vector<ServerCompletionQueue*> cqs_;
   std::shared_ptr<ServerCredentials> creds_;
+  AsyncGenericService* generic_service_;
   ThreadPoolInterface* thread_pool_;
 };
 
 }  // namespace grpc
 
-#endif  // __GRPCPP_SERVER_BUILDER_H__
+#endif  // GRPCXX_SERVER_BUILDER_H

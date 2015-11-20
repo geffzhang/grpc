@@ -42,7 +42,9 @@
 #include <grpc/support/log_win32.h>
 #include <grpc/support/log.h>
 #include <grpc/support/time.h>
+#include <grpc/support/string_util.h>
 
+#include "src/core/support/string.h"
 #include "src/core/support/string_win32.h"
 
 void gpr_log(const char *file, int line, gpr_log_severity severity,
@@ -55,7 +57,7 @@ void gpr_log(const char *file, int line, gpr_log_severity severity,
   va_start(args, format);
   ret = _vscprintf(format, args);
   va_end(args);
-  if (!(0 <= ret && ret < ~(size_t)0)) {
+  if (ret < 0) {
     message = NULL;
   } else {
     /* Allocate a new buffer, with space for the NUL terminator. */
@@ -66,7 +68,7 @@ void gpr_log(const char *file, int line, gpr_log_severity severity,
     va_start(args, format);
     ret = vsnprintf_s(message, strp_buflen, _TRUNCATE, format, args);
     va_end(args);
-    if (ret != strp_buflen - 1) {
+    if ((size_t)ret != strp_buflen - 1) {
       /* This should never happen. */
       gpr_free(message);
       message = NULL;
@@ -79,9 +81,17 @@ void gpr_log(const char *file, int line, gpr_log_severity severity,
 
 /* Simple starter implementation */
 void gpr_default_log(gpr_log_func_args *args) {
+  char *final_slash;
+  const char *display_file;
   char time_buffer[64];
-  gpr_timespec now = gpr_now();
+  gpr_timespec now = gpr_now(GPR_CLOCK_REALTIME);
   struct tm tm;
+
+  final_slash = strrchr(args->file, '\\');
+  if (final_slash == NULL)
+    display_file = args->file;
+  else
+    display_file = final_slash + 1;
 
   if (localtime_s(&tm, &now.tv_sec)) {
     strcpy(time_buffer, "error:localtime");
@@ -90,24 +100,24 @@ void gpr_default_log(gpr_log_func_args *args) {
     strcpy(time_buffer, "error:strftime");
   }
 
-  fprintf(stderr, "%s%s.%09u %5u %s:%d] %s\n",
+  fprintf(stderr, "%s%s.%09u %5lu %s:%d] %s\n",
           gpr_log_severity_string(args->severity), time_buffer,
-          (int)(now.tv_nsec), GetCurrentThreadId(),
-          args->file, args->line, args->message);
+          (int)(now.tv_nsec), GetCurrentThreadId(), display_file, args->line,
+          args->message);
 }
 
 char *gpr_format_message(DWORD messageid) {
   LPTSTR tmessage;
   char *message;
-  DWORD status = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                               FORMAT_MESSAGE_FROM_SYSTEM |
-                               FORMAT_MESSAGE_IGNORE_INSERTS,
-                               NULL, messageid,
-                               MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                               (LPTSTR)(&tmessage), 0, NULL);
+  DWORD status = FormatMessage(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+          FORMAT_MESSAGE_IGNORE_INSERTS,
+      NULL, messageid, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPTSTR)(&tmessage), 0, NULL);
+  if (status == 0) return gpr_strdup("Unable to retrieve error string");
   message = gpr_tchar_to_char(tmessage);
   LocalFree(tmessage);
   return message;
 }
 
-#endif  /* GPR_WIN32 */
+#endif /* GPR_WIN32 */

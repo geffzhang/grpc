@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __FAKE_TRANSPORT_SECURITY_H_
-#define __FAKE_TRANSPORT_SECURITY_H_
+#ifndef GRPC_INTERNAL_CORE_TSI_FAKE_TRANSPORT_SECURITY_H
+#define GRPC_INTERNAL_CORE_TSI_FAKE_TRANSPORT_SECURITY_H
 
 #include "src/core/tsi/transport_security_interface.h"
 
@@ -48,14 +48,14 @@ extern "C" {
    No cryptography is performed in these objects. They just simulate handshake
    messages going back and forth for the handshaker and do some framing on
    cleartext data for the protector.  */
-tsi_handshaker* tsi_create_fake_handshaker(int is_client);
+tsi_handshaker *tsi_create_fake_handshaker(int is_client);
 
 /* Creates a protector directly without going through the handshake phase. */
-tsi_frame_protector* tsi_create_fake_protector(
-    size_t* max_protected_frame_size);
+tsi_frame_protector *tsi_create_fake_protector(
+    size_t *max_protected_frame_size);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __FAKE_TRANSPORT_SECURITY_H_ */
+#endif /* GRPC_INTERNAL_CORE_TSI_FAKE_TRANSPORT_SECURITY_H */

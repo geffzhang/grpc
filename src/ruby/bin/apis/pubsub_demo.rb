@@ -66,12 +66,12 @@ end
 
 # creates a SSL Credentials from the production certificates.
 def ssl_creds
-  GRPC::Core::Credentials.new(load_prod_cert)
+  GRPC::Core::ChannelCredentials.new(load_prod_cert)
 end
 
 # Builds the metadata authentication update proc.
 def auth_proc(opts)
-  auth_creds = Google::Auth.get_application_default(opts.oauth_scope)
+  auth_creds = Google::Auth.get_application_default
   return auth_creds.updater_proc
 end
 
@@ -79,7 +79,7 @@ end
 def publisher_stub(opts)
   address = "#{opts.host}:#{opts.port}"
   stub_clz = Tech::Pubsub::PublisherService::Stub # shorter
-  logger.info("... access PublisherService at #{address}")
+  GRPC.logger.info("... access PublisherService at #{address}")
   stub_clz.new(address,
                creds: ssl_creds, update_metadata: auth_proc(opts),
                GRPC::Core::Channel::SSL_TARGET => opts.host)
@@ -89,7 +89,7 @@ end
 def subscriber_stub(opts)
   address = "#{opts.host}:#{opts.port}"
   stub_clz = Tech::Pubsub::SubscriberService::Stub # shorter
-  logger.info("... access SubscriberService at #{address}")
+  GRPC.logger.info("... access SubscriberService at #{address}")
   stub_clz.new(address,
                creds: ssl_creds, update_metadata: auth_proc(opts),
                GRPC::Core::Channel::SSL_TARGET => opts.host)
@@ -213,17 +213,14 @@ class NamedActions
 end
 
 # Args is used to hold the command line info.
-Args = Struct.new(:host, :oauth_scope, :port, :action, :project_id, :topic_name,
+Args = Struct.new(:host, :port, :action, :project_id, :topic_name,
                   :sub_name)
 
 # validates the the command line options, returning them as an Arg.
 def parse_args
   args = Args.new('pubsub-staging.googleapis.com',
-                  'https://www.googleapis.com/auth/pubsub',
                    443, 'list_some_topics', 'stoked-keyword-656')
   OptionParser.new do |opts|
-    opts.on('--oauth_scope scope',
-            'Scope for OAuth tokens') { |v| args['oauth_scope'] = v }
     opts.on('--server_host SERVER_HOST', 'server hostname') do |v|
       args.host = v
     end
@@ -250,7 +247,7 @@ def parse_args
 end
 
 def _check_args(args)
-  %w(host port action oauth_scope).each do |a|
+  %w(host port action).each do |a|
     if args[a].nil?
       raise OptionParser::MissingArgument.new("please specify --#{a}")
     end

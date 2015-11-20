@@ -31,95 +31,125 @@
  *
  */
 
-#include "src/core/surface/lame_client.h"
+#include <grpc/grpc.h>
 
 #include <string.h>
 
 #include "src/core/channel/channel_stack.h"
 #include "src/core/support/string.h"
+#include "src/core/surface/api_trace.h"
 #include "src/core/surface/channel.h"
 #include "src/core/surface/call.h"
 #include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 
 typedef struct {
-  void *unused;
+  grpc_linked_mdelem status;
+  grpc_linked_mdelem details;
 } call_data;
 
 typedef struct {
-  grpc_mdelem *status;
-  grpc_mdelem *message;
+  grpc_mdctx *mdctx;
+  grpc_channel *master;
+  grpc_status_code error_code;
+  const char *error_message;
 } channel_data;
 
-static void call_op(grpc_call_element *elem, grpc_call_element *from_elem,
-                    grpc_call_op *op) {
-  channel_data *channeld = elem->channel_data;
+static void fill_metadata(grpc_call_element *elem, grpc_metadata_batch *mdb) {
+  call_data *calld = elem->call_data;
+  channel_data *chand = elem->channel_data;
+  char tmp[GPR_LTOA_MIN_BUFSIZE];
+  gpr_ltoa(chand->error_code, tmp);
+  calld->status.md = grpc_mdelem_from_strings(chand->mdctx, "grpc-status", tmp);
+  calld->details.md = grpc_mdelem_from_strings(chand->mdctx, "grpc-message",
+                                               chand->error_message);
+  calld->status.prev = calld->details.next = NULL;
+  calld->status.next = &calld->details;
+  calld->details.prev = &calld->status;
+  mdb->list.head = &calld->status;
+  mdb->list.tail = &calld->details;
+  mdb->deadline = gpr_inf_future(GPR_CLOCK_REALTIME);
+}
+
+static void lame_start_transport_stream_op(grpc_exec_ctx *exec_ctx,
+                                           grpc_call_element *elem,
+                                           grpc_transport_stream_op *op) {
   GRPC_CALL_LOG_OP(GPR_INFO, elem, op);
-
-  switch (op->type) {
-    case GRPC_SEND_START:
-      grpc_call_recv_metadata(elem, grpc_mdelem_ref(channeld->status));
-      grpc_call_recv_metadata(elem, grpc_mdelem_ref(channeld->message));
-      grpc_call_stream_closed(elem);
-      break;
-    case GRPC_SEND_METADATA:
-      grpc_mdelem_unref(op->data.metadata);
-      break;
-    default:
-      break;
+  if (op->recv_initial_metadata != NULL) {
+    fill_metadata(elem, op->recv_initial_metadata);
+  } else if (op->recv_trailing_metadata != NULL) {
+    fill_metadata(elem, op->recv_trailing_metadata);
   }
-
-  op->done_cb(op->user_data, GRPC_OP_ERROR);
+  grpc_exec_ctx_enqueue(exec_ctx, op->on_complete, 0);
+  grpc_exec_ctx_enqueue(exec_ctx, op->recv_message_ready, 0);
 }
 
-static void channel_op(grpc_channel_element *elem,
-                       grpc_channel_element *from_elem, grpc_channel_op *op) {
-  switch (op->type) {
-    case GRPC_CHANNEL_GOAWAY:
-      gpr_slice_unref(op->data.goaway.message);
-      break;
-    case GRPC_CHANNEL_DISCONNECT:
-      grpc_client_channel_closed(elem);
-      break;
-    default:
-      break;
+static char *lame_get_peer(grpc_exec_ctx *exec_ctx, grpc_call_element *elem) {
+  channel_data *chand = elem->channel_data;
+  return grpc_channel_get_target(chand->master);
+}
+
+static void lame_start_transport_op(grpc_exec_ctx *exec_ctx,
+                                    grpc_channel_element *elem,
+                                    grpc_transport_op *op) {
+  if (op->on_connectivity_state_change) {
+    GPR_ASSERT(*op->connectivity_state != GRPC_CHANNEL_FATAL_FAILURE);
+    *op->connectivity_state = GRPC_CHANNEL_FATAL_FAILURE;
+    op->on_connectivity_state_change->cb(
+        exec_ctx, op->on_connectivity_state_change->cb_arg, 1);
+  }
+  if (op->on_consumed != NULL) {
+    op->on_consumed->cb(exec_ctx, op->on_consumed->cb_arg, 1);
   }
 }
 
-static void init_call_elem(grpc_call_element *elem,
-                           const void *transport_server_data) {}
+static void init_call_elem(grpc_exec_ctx *exec_ctx, grpc_call_element *elem,
+                           grpc_call_element_args *args) {}
 
-static void destroy_call_elem(grpc_call_element *elem) {}
+static void destroy_call_elem(grpc_exec_ctx *exec_ctx,
+                              grpc_call_element *elem) {}
 
-static void init_channel_elem(grpc_channel_element *elem,
-                              const grpc_channel_args *args, grpc_mdctx *mdctx,
-                              int is_first, int is_last) {
-  channel_data *channeld = elem->channel_data;
-  char status[12];
-
-  GPR_ASSERT(is_first);
-  GPR_ASSERT(is_last);
-
-  channeld->message = grpc_mdelem_from_strings(mdctx, "grpc-message",
-                                               "Rpc sent on a lame channel.");
-  gpr_ltoa(GRPC_STATUS_UNKNOWN, status);
-  channeld->status = grpc_mdelem_from_strings(mdctx, "grpc-status", status);
+static void init_channel_elem(grpc_exec_ctx *exec_ctx,
+                              grpc_channel_element *elem,
+                              grpc_channel_element_args *args) {
+  channel_data *chand = elem->channel_data;
+  GPR_ASSERT(args->is_first);
+  GPR_ASSERT(args->is_last);
+  chand->mdctx = args->metadata_context;
+  chand->master = args->master;
 }
 
-static void destroy_channel_elem(grpc_channel_element *elem) {
-  channel_data *channeld = elem->channel_data;
-
-  grpc_mdelem_unref(channeld->message);
-  grpc_mdelem_unref(channeld->status);
-}
+static void destroy_channel_elem(grpc_exec_ctx *exec_ctx,
+                                 grpc_channel_element *elem) {}
 
 static const grpc_channel_filter lame_filter = {
-    call_op,           channel_op,           sizeof(call_data),
-    init_call_elem,    destroy_call_elem,    sizeof(channel_data),
-    init_channel_elem, destroy_channel_elem, "lame-client", };
+    lame_start_transport_stream_op, lame_start_transport_op, sizeof(call_data),
+    init_call_elem, grpc_call_stack_ignore_set_pollset, destroy_call_elem,
+    sizeof(channel_data), init_channel_elem, destroy_channel_elem,
+    lame_get_peer, "lame-client",
+};
 
-grpc_channel *grpc_lame_client_channel_create(void) {
+#define CHANNEL_STACK_FROM_CHANNEL(c) ((grpc_channel_stack *)((c) + 1))
+
+grpc_channel *grpc_lame_client_channel_create(const char *target,
+                                              grpc_status_code error_code,
+                                              const char *error_message) {
+  grpc_channel *channel;
+  grpc_channel_element *elem;
+  channel_data *chand;
+  grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
   static const grpc_channel_filter *filters[] = {&lame_filter};
-  return grpc_channel_create_from_filters(filters, 1, NULL, grpc_mdctx_create(),
-                                          1);
+  channel = grpc_channel_create_from_filters(&exec_ctx, target, filters, 1,
+                                             NULL, grpc_mdctx_create(), 1);
+  elem = grpc_channel_stack_element(grpc_channel_get_channel_stack(channel), 0);
+  GRPC_API_TRACE(
+      "grpc_lame_client_channel_create(target=%s, error_code=%d, "
+      "error_message=%s)",
+      3, (target, (int)error_code, error_message));
+  GPR_ASSERT(elem->filter == &lame_filter);
+  chand = (channel_data *)elem->channel_data;
+  chand->error_code = error_code;
+  chand->error_message = error_message;
+  grpc_exec_ctx_finish(&exec_ctx);
+  return channel;
 }

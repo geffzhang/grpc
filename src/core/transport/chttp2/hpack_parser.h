@@ -31,12 +31,13 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_TRANSPORT_CHTTP2_HPACK_PARSER_H__
-#define __GRPC_INTERNAL_TRANSPORT_CHTTP2_HPACK_PARSER_H__
+#ifndef GRPC_INTERNAL_CORE_TRANSPORT_CHTTP2_HPACK_PARSER_H
+#define GRPC_INTERNAL_CORE_TRANSPORT_CHTTP2_HPACK_PARSER_H
 
 #include <stddef.h>
 
 #include <grpc/support/port_platform.h>
+#include "src/core/iomgr/exec_ctx.h"
 #include "src/core/transport/chttp2/frame.h"
 #include "src/core/transport/chttp2/hpack_table.h"
 #include "src/core/transport/metadata.h"
@@ -62,6 +63,8 @@ struct grpc_chttp2_hpack_parser {
   grpc_chttp2_hpack_parser_state state;
   /* future states dependent on the opening op code */
   const grpc_chttp2_hpack_parser_state *next_state;
+  /* what to do after skipping prioritization data */
+  grpc_chttp2_hpack_parser_state after_prioritization;
   /* the value we're currently parsing */
   union {
     gpr_uint32 *value;
@@ -77,7 +80,7 @@ struct grpc_chttp2_hpack_parser {
   /* number of source bytes read for the currently parsing string */
   gpr_uint32 strgot;
   /* huffman decoding state */
-  gpr_uint16 huff_state;
+  gpr_int16 huff_state;
   /* is the string being decoded binary? */
   gpr_uint8 binary;
   /* is the current string huffman encoded? */
@@ -105,7 +108,8 @@ int grpc_chttp2_hpack_parser_parse(grpc_chttp2_hpack_parser *p,
 /* wraps grpc_chttp2_hpack_parser_parse to provide a frame level parser for
    the transport */
 grpc_chttp2_parse_error grpc_chttp2_header_parser_parse(
-    void *hpack_parser, grpc_chttp2_parse_state *state, gpr_slice slice,
-    int is_last);
+    grpc_exec_ctx *exec_ctx, void *hpack_parser,
+    grpc_chttp2_transport_parsing *transport_parsing,
+    grpc_chttp2_stream_parsing *stream_parsing, gpr_slice slice, int is_last);
 
-#endif /* __GRPC_INTERNAL_TRANSPORT_CHTTP2_HPACK_PARSER_H__ */
+#endif /* GRPC_INTERNAL_CORE_TRANSPORT_CHTTP2_HPACK_PARSER_H */

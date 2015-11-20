@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPCPP_IMPL_RPC_SERVICE_METHOD_H__
-#define __GRPCPP_IMPL_RPC_SERVICE_METHOD_H__
+#ifndef GRPCXX_IMPL_RPC_SERVICE_METHOD_H
+#define GRPCXX_IMPL_RPC_SERVICE_METHOD_H
 
 #include <functional>
 #include <map>
@@ -40,9 +40,9 @@
 #include <vector>
 
 #include <grpc++/impl/rpc_method.h>
-#include <grpc++/status.h>
-#include <grpc++/stream.h>
-#include <google/protobuf/message.h>
+#include <grpc++/support/config.h>
+#include <grpc++/support/status.h>
+#include <grpc++/support/sync_stream.h>
 
 namespace grpc {
 class ServerContext;
@@ -55,16 +55,19 @@ class MethodHandler {
  public:
   virtual ~MethodHandler() {}
   struct HandlerParameter {
-    HandlerParameter(Call* c, ServerContext* context,
-                     const google::protobuf::Message* req,
-                     google::protobuf::Message* resp)
-        : call(c), server_context(context), request(req), response(resp) {}
+    HandlerParameter(Call* c, ServerContext* context, grpc_byte_buffer* req,
+                     int max_size)
+        : call(c),
+          server_context(context),
+          request(req),
+          max_message_size(max_size) {}
     Call* call;
     ServerContext* server_context;
-    const google::protobuf::Message* request;
-    google::protobuf::Message* response;
+    // Handler required to grpc_byte_buffer_destroy this
+    grpc_byte_buffer* request;
+    int max_message_size;
   };
-  virtual Status RunHandler(const HandlerParameter& param) = 0;
+  virtual void RunHandler(const HandlerParameter& param) = 0;
 };
 
 // A wrapper class of an application provided rpc method handler.
@@ -77,11 +80,25 @@ class RpcMethodHandler : public MethodHandler {
       ServiceType* service)
       : func_(func), service_(service) {}
 
-  Status RunHandler(const HandlerParameter& param) GRPC_FINAL {
-    // Invoke application function, cast proto messages to their actual types.
-    return func_(service_, param.server_context,
-                 dynamic_cast<const RequestType*>(param.request),
-                 dynamic_cast<ResponseType*>(param.response));
+  void RunHandler(const HandlerParameter& param) GRPC_FINAL {
+    RequestType req;
+    Status status = SerializationTraits<RequestType>::Deserialize(
+        param.request, &req, param.max_message_size);
+    ResponseType rsp;
+    if (status.ok()) {
+      status = func_(service_, param.server_context, &req, &rsp);
+    }
+
+    GPR_ASSERT(!param.server_context->sent_initial_metadata_);
+    CallOpSet<CallOpSendInitialMetadata, CallOpSendMessage,
+              CallOpServerSendStatus> ops;
+    ops.SendInitialMetadata(param.server_context->initial_metadata_);
+    if (status.ok()) {
+      status = ops.SendMessage(rsp);
+    }
+    ops.ServerSendStatus(param.server_context->trailing_metadata_, status);
+    param.call->PerformOps(&ops);
+    param.call->cq()->Pluck(&ops);
   }
 
  private:
@@ -102,10 +119,21 @@ class ClientStreamingHandler : public MethodHandler {
       ServiceType* service)
       : func_(func), service_(service) {}
 
-  Status RunHandler(const HandlerParameter& param) GRPC_FINAL {
+  void RunHandler(const HandlerParameter& param) GRPC_FINAL {
     ServerReader<RequestType> reader(param.call, param.server_context);
-    return func_(service_, param.server_context, &reader,
-                 dynamic_cast<ResponseType*>(param.response));
+    ResponseType rsp;
+    Status status = func_(service_, param.server_context, &reader, &rsp);
+
+    GPR_ASSERT(!param.server_context->sent_initial_metadata_);
+    CallOpSet<CallOpSendInitialMetadata, CallOpSendMessage,
+              CallOpServerSendStatus> ops;
+    ops.SendInitialMetadata(param.server_context->initial_metadata_);
+    if (status.ok()) {
+      status = ops.SendMessage(rsp);
+    }
+    ops.ServerSendStatus(param.server_context->trailing_metadata_, status);
+    param.call->PerformOps(&ops);
+    param.call->cq()->Pluck(&ops);
   }
 
  private:
@@ -124,10 +152,23 @@ class ServerStreamingHandler : public MethodHandler {
       ServiceType* service)
       : func_(func), service_(service) {}
 
-  Status RunHandler(const HandlerParameter& param) GRPC_FINAL {
-    ServerWriter<ResponseType> writer(param.call, param.server_context);
-    return func_(service_, param.server_context,
-                 dynamic_cast<const RequestType*>(param.request), &writer);
+  void RunHandler(const HandlerParameter& param) GRPC_FINAL {
+    RequestType req;
+    Status status = SerializationTraits<RequestType>::Deserialize(
+        param.request, &req, param.max_message_size);
+
+    if (status.ok()) {
+      ServerWriter<ResponseType> writer(param.call, param.server_context);
+      status = func_(service_, param.server_context, &req, &writer);
+    }
+
+    CallOpSet<CallOpSendInitialMetadata, CallOpServerSendStatus> ops;
+    if (!param.server_context->sent_initial_metadata_) {
+      ops.SendInitialMetadata(param.server_context->initial_metadata_);
+    }
+    ops.ServerSendStatus(param.server_context->trailing_metadata_, status);
+    param.call->PerformOps(&ops);
+    param.call->cq()->Pluck(&ops);
   }
 
  private:
@@ -147,10 +188,18 @@ class BidiStreamingHandler : public MethodHandler {
       ServiceType* service)
       : func_(func), service_(service) {}
 
-  Status RunHandler(const HandlerParameter& param) GRPC_FINAL {
+  void RunHandler(const HandlerParameter& param) GRPC_FINAL {
     ServerReaderWriter<ResponseType, RequestType> stream(param.call,
                                                          param.server_context);
-    return func_(service_, param.server_context, &stream);
+    Status status = func_(service_, param.server_context, &stream);
+
+    CallOpSet<CallOpSendInitialMetadata, CallOpServerSendStatus> ops;
+    if (!param.server_context->sent_initial_metadata_) {
+      ops.SendInitialMetadata(param.server_context->initial_metadata_);
+    }
+    ops.ServerSendStatus(param.server_context->trailing_metadata_, status);
+    param.call->PerformOps(&ops);
+    param.call->cq()->Pluck(&ops);
   }
 
  private:
@@ -159,32 +208,39 @@ class BidiStreamingHandler : public MethodHandler {
   ServiceType* service_;
 };
 
+// Handle unknown method by returning UNIMPLEMENTED error.
+class UnknownMethodHandler : public MethodHandler {
+ public:
+  template <class T>
+  static void FillOps(ServerContext* context, T* ops) {
+    Status status(StatusCode::UNIMPLEMENTED, "");
+    if (!context->sent_initial_metadata_) {
+      ops->SendInitialMetadata(context->initial_metadata_);
+      context->sent_initial_metadata_ = true;
+    }
+    ops->ServerSendStatus(context->trailing_metadata_, status);
+  }
+
+  void RunHandler(const HandlerParameter& param) GRPC_FINAL {
+    CallOpSet<CallOpSendInitialMetadata, CallOpServerSendStatus> ops;
+    FillOps(param.server_context, &ops);
+    param.call->PerformOps(&ops);
+    param.call->cq()->Pluck(&ops);
+  }
+};
+
 // Server side rpc method class
 class RpcServiceMethod : public RpcMethod {
  public:
-  // Takes ownership of the handler and two prototype objects.
+  // Takes ownership of the handler
   RpcServiceMethod(const char* name, RpcMethod::RpcType type,
-                   MethodHandler* handler,
-                   google::protobuf::Message* request_prototype,
-                   google::protobuf::Message* response_prototype)
-      : RpcMethod(name, type),
-        handler_(handler),
-        request_prototype_(request_prototype),
-        response_prototype_(response_prototype) {}
+                   MethodHandler* handler)
+      : RpcMethod(name, type), handler_(handler) {}
 
   MethodHandler* handler() { return handler_.get(); }
 
-  google::protobuf::Message* AllocateRequestProto() {
-    return request_prototype_->New();
-  }
-  google::protobuf::Message* AllocateResponseProto() {
-    return response_prototype_->New();
-  }
-
  private:
   std::unique_ptr<MethodHandler> handler_;
-  std::unique_ptr<google::protobuf::Message> request_prototype_;
-  std::unique_ptr<google::protobuf::Message> response_prototype_;
 };
 
 // This class contains all the method information for an rpc service. It is
@@ -203,4 +259,4 @@ class RpcService {
 
 }  // namespace grpc
 
-#endif  // __GRPCPP_IMPL_RPC_SERVICE_METHOD_H__
+#endif  // GRPCXX_IMPL_RPC_SERVICE_METHOD_H

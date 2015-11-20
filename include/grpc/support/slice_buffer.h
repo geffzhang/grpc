@@ -31,14 +31,16 @@
  *
  */
 
-#ifndef __GRPC_SUPPORT_SLICE_BUFFER_H__
-#define __GRPC_SUPPORT_SLICE_BUFFER_H__
+#ifndef GRPC_SUPPORT_SLICE_BUFFER_H
+#define GRPC_SUPPORT_SLICE_BUFFER_H
 
 #include <grpc/support/slice.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define GRPC_SLICE_BUFFER_INLINE_ELEMENTS 8
 
 /* Represents an expandable array of slices, to be interpreted as a single item
    TODO(ctiller): inline some small number of elements into the struct, to
@@ -52,6 +54,8 @@ typedef struct {
   size_t capacity;
   /* the combined length of all slices in the array */
   size_t length;
+  /* inlined elements to avoid allocations */
+  gpr_slice inlined[GRPC_SLICE_BUFFER_INLINE_ELEMENTS];
 } gpr_slice_buffer;
 
 /* initialize a slice buffer */
@@ -73,12 +77,26 @@ size_t gpr_slice_buffer_add_indexed(gpr_slice_buffer *sb, gpr_slice slice);
 void gpr_slice_buffer_addn(gpr_slice_buffer *sb, gpr_slice *slices, size_t n);
 /* add a very small (less than 8 bytes) amount of data to the end of a slice
    buffer: returns a pointer into which to add the data */
-gpr_uint8 *gpr_slice_buffer_tiny_add(gpr_slice_buffer *sb, unsigned len);
+gpr_uint8 *gpr_slice_buffer_tiny_add(gpr_slice_buffer *sb, size_t len);
+/* pop the last buffer, but don't unref it */
+void gpr_slice_buffer_pop(gpr_slice_buffer *sb);
 /* clear a slice buffer, unref all elements */
 void gpr_slice_buffer_reset_and_unref(gpr_slice_buffer *sb);
+/* swap the contents of two slice buffers */
+void gpr_slice_buffer_swap(gpr_slice_buffer *a, gpr_slice_buffer *b);
+/* move all of the elements of src into dst */
+void gpr_slice_buffer_move_into(gpr_slice_buffer *src, gpr_slice_buffer *dst);
+/* remove n bytes from the end of a slice buffer */
+void gpr_slice_buffer_trim_end(gpr_slice_buffer *src, size_t n,
+                               gpr_slice_buffer *garbage);
+/* move the first n bytes of src into dst */
+void gpr_slice_buffer_move_first(gpr_slice_buffer *src, size_t n,
+                                 gpr_slice_buffer *dst);
+/* take the first slice in the slice buffer */
+gpr_slice gpr_slice_buffer_take_first(gpr_slice_buffer *src);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __GRPC_SUPPORT_SLICE_BUFFER_H__ */
+#endif /* GRPC_SUPPORT_SLICE_BUFFER_H */

@@ -42,7 +42,7 @@
 #include <grpc/support/alloc.h>
 #include <grpc/support/thd.h>
 
-#include "src/core/iomgr/alarm_internal.h"
+#include "src/core/iomgr/timer_internal.h"
 #include "src/core/iomgr/iocp_windows.h"
 #include "src/core/iomgr/iomgr_internal.h"
 #include "src/core/iomgr/socket_windows.h"
@@ -50,46 +50,57 @@
 static ULONG g_iocp_kick_token;
 static OVERLAPPED g_iocp_custom_overlap;
 
-static gpr_event g_shutdown_iocp;
-static gpr_event g_iocp_done;
+static gpr_atm g_custom_events = 0;
 
 static HANDLE g_iocp;
 
-static int do_iocp_work() {
+static DWORD deadline_to_millis_timeout(gpr_timespec deadline,
+                                        gpr_timespec now) {
+  gpr_timespec timeout;
+  static const int max_spin_polling_us = 10;
+  if (gpr_time_cmp(deadline, gpr_inf_future(deadline.clock_type)) == 0) {
+    return INFINITE;
+  }
+  if (gpr_time_cmp(deadline, gpr_time_add(now, gpr_time_from_micros(
+                                                   max_spin_polling_us,
+                                                   GPR_TIMESPAN))) <= 0) {
+    return 0;
+  }
+  timeout = gpr_time_sub(deadline, now);
+  return gpr_time_to_millis(gpr_time_add(
+      timeout, gpr_time_from_nanos(GPR_NS_PER_MS - 1, GPR_TIMESPAN)));
+}
+
+void grpc_iocp_work(grpc_exec_ctx *exec_ctx, gpr_timespec deadline) {
   BOOL success;
   DWORD bytes = 0;
   DWORD flags = 0;
   ULONG_PTR completion_key;
   LPOVERLAPPED overlapped;
-  gpr_timespec wait_time = gpr_inf_future;
   grpc_winsocket *socket;
   grpc_winsocket_callback_info *info;
-  void(*f)(void *, int) = NULL;
-  void *opaque = NULL;
-  success = GetQueuedCompletionStatus(g_iocp, &bytes,
-                                      &completion_key, &overlapped,
-                                      gpr_time_to_millis(wait_time));
-  if (!success && !overlapped) {
-    /* The deadline got attained. */
-    return 0;
+  grpc_closure *closure = NULL;
+  success = GetQueuedCompletionStatus(
+      g_iocp, &bytes, &completion_key, &overlapped,
+      deadline_to_millis_timeout(deadline, gpr_now(deadline.clock_type)));
+  if (success == 0 && overlapped == NULL) {
+    return;
   }
   GPR_ASSERT(completion_key && overlapped);
   if (overlapped == &g_iocp_custom_overlap) {
-    if (completion_key == (ULONG_PTR) &g_iocp_kick_token) {
+    gpr_atm_full_fetch_add(&g_custom_events, -1);
+    if (completion_key == (ULONG_PTR)&g_iocp_kick_token) {
       /* We were awoken from a kick. */
-      gpr_log(GPR_DEBUG, "do_iocp_work - got a kick");
-      return 1;
+      return;
     }
     gpr_log(GPR_ERROR, "Unknown custom completion key.");
     abort();
   }
 
-  socket = (grpc_winsocket*) completion_key;
+  socket = (grpc_winsocket *)completion_key;
   if (overlapped == &socket->write_info.overlapped) {
-    gpr_log(GPR_DEBUG, "do_iocp_work - got write packet");
     info = &socket->write_info;
   } else if (overlapped == &socket->read_info.overlapped) {
-    gpr_log(GPR_DEBUG, "do_iocp_work - got read packet");
     info = &socket->read_info;
   } else {
     gpr_log(GPR_ERROR, "Unknown IOCP operation");
@@ -97,64 +108,59 @@ static int do_iocp_work() {
   }
   success = WSAGetOverlappedResult(socket->socket, &info->overlapped, &bytes,
                                    FALSE, &flags);
-  gpr_log(GPR_DEBUG, "bytes: %u, flags: %u - op %s", bytes, flags,
-          success ? "succeeded" : "failed");
   info->bytes_transfered = bytes;
   info->wsa_error = success ? 0 : WSAGetLastError();
   GPR_ASSERT(overlapped == &info->overlapped);
-  gpr_mu_lock(&socket->state_mu);
   GPR_ASSERT(!info->has_pending_iocp);
-  if (info->cb) {
-    f = info->cb;
-    opaque = info->opaque;
-    info->cb = NULL;
+  gpr_mu_lock(&socket->state_mu);
+  if (info->closure) {
+    closure = info->closure;
+    info->closure = NULL;
   } else {
     info->has_pending_iocp = 1;
   }
   gpr_mu_unlock(&socket->state_mu);
-  if (f) f(opaque, 1);
-
-  return 1;
-}
-
-static void iocp_loop(void *p) {
-  while (!gpr_event_get(&g_shutdown_iocp)) {
-    grpc_maybe_call_delayed_callbacks(NULL, 1);
-    do_iocp_work();
-  }
-
-  gpr_event_set(&g_iocp_done, (void *)1);
+  grpc_exec_ctx_enqueue(exec_ctx, closure, 1);
 }
 
 void grpc_iocp_init(void) {
-  gpr_thd_id id;
-
-  g_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL,
-    (ULONG_PTR)NULL, 0);
+  g_iocp =
+      CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, (ULONG_PTR)NULL, 0);
   GPR_ASSERT(g_iocp);
+}
 
-  gpr_event_init(&g_iocp_done);
-  gpr_event_init(&g_shutdown_iocp);
-  gpr_thd_new(&id, iocp_loop, NULL, NULL);
+void grpc_iocp_kick(void) {
+  BOOL success;
+
+  gpr_atm_full_fetch_add(&g_custom_events, 1);
+  success = PostQueuedCompletionStatus(g_iocp, 0, (ULONG_PTR)&g_iocp_kick_token,
+                                       &g_iocp_custom_overlap);
+  GPR_ASSERT(success);
+}
+
+void grpc_iocp_flush(void) {
+  grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
+
+  do {
+    grpc_iocp_work(&exec_ctx, gpr_inf_past(GPR_CLOCK_MONOTONIC));
+  } while (grpc_exec_ctx_flush(&exec_ctx));
 }
 
 void grpc_iocp_shutdown(void) {
-  BOOL success;
-  gpr_event_set(&g_shutdown_iocp, (void *)1);
-  success = PostQueuedCompletionStatus(g_iocp, 0,
-                                       (ULONG_PTR) &g_iocp_kick_token,
-                                       &g_iocp_custom_overlap);
-  GPR_ASSERT(success);
-  gpr_event_wait(&g_iocp_done, gpr_inf_future);
-  success = CloseHandle(g_iocp);
-  GPR_ASSERT(success);
+  grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
+  while (gpr_atm_acq_load(&g_custom_events)) {
+    grpc_iocp_work(&exec_ctx, gpr_inf_future(GPR_CLOCK_MONOTONIC));
+    grpc_exec_ctx_flush(&exec_ctx);
+  }
+  grpc_exec_ctx_finish(&exec_ctx);
+  GPR_ASSERT(CloseHandle(g_iocp));
 }
 
 void grpc_iocp_add_socket(grpc_winsocket *socket) {
   HANDLE ret;
   if (socket->added_to_iocp) return;
-  ret = CreateIoCompletionPort((HANDLE)socket->socket,
-                               g_iocp, (gpr_uintptr) socket, 0);
+  ret = CreateIoCompletionPort((HANDLE)socket->socket, g_iocp,
+                               (gpr_uintptr)socket, 0);
   if (!ret) {
     char *utf8_message = gpr_format_message(WSAGetLastError());
     gpr_log(GPR_ERROR, "Unable to add socket to iocp: %s", utf8_message);
@@ -166,35 +172,35 @@ void grpc_iocp_add_socket(grpc_winsocket *socket) {
   GPR_ASSERT(ret == g_iocp);
 }
 
-static void socket_notify_on_iocp(grpc_winsocket *socket,
-                                  void(*cb)(void *, int), void *opaque,
+/* Calling notify_on_read or write means either of two things:
+   -) The IOCP already completed in the background, and we need to call
+   the callback now.
+   -) The IOCP hasn't completed yet, and we're queuing it for later. */
+static void socket_notify_on_iocp(grpc_exec_ctx *exec_ctx,
+                                  grpc_winsocket *socket, grpc_closure *closure,
                                   grpc_winsocket_callback_info *info) {
   int run_now = 0;
-  GPR_ASSERT(!info->cb);
+  GPR_ASSERT(info->closure == NULL);
   gpr_mu_lock(&socket->state_mu);
   if (info->has_pending_iocp) {
     run_now = 1;
     info->has_pending_iocp = 0;
-    gpr_log(GPR_DEBUG, "socket_notify_on_iocp - runs now");
+    grpc_exec_ctx_enqueue(exec_ctx, closure, 1);
   } else {
-    info->cb = cb;
-    info->opaque = opaque;
-    gpr_log(GPR_DEBUG, "socket_notify_on_iocp - queued");
+    info->closure = closure;
   }
   gpr_mu_unlock(&socket->state_mu);
-  if (run_now) cb(opaque, 1);
 }
 
-void grpc_socket_notify_on_write(grpc_winsocket *socket,
-                                 void(*cb)(void *, int), void *opaque) {
-  gpr_log(GPR_DEBUG, "grpc_socket_notify_on_write");
-  socket_notify_on_iocp(socket, cb, opaque, &socket->write_info);
+void grpc_socket_notify_on_write(grpc_exec_ctx *exec_ctx,
+                                 grpc_winsocket *socket,
+                                 grpc_closure *closure) {
+  socket_notify_on_iocp(exec_ctx, socket, closure, &socket->write_info);
 }
 
-void grpc_socket_notify_on_read(grpc_winsocket *socket,
-                                void(*cb)(void *, int), void *opaque) {
-  gpr_log(GPR_DEBUG, "grpc_socket_notify_on_read");
-  socket_notify_on_iocp(socket, cb, opaque, &socket->read_info);
+void grpc_socket_notify_on_read(grpc_exec_ctx *exec_ctx, grpc_winsocket *socket,
+                                grpc_closure *closure) {
+  socket_notify_on_iocp(exec_ctx, socket, closure, &socket->read_info);
 }
 
-#endif  /* GPR_WINSOCK_SOCKET */
+#endif /* GPR_WINSOCK_SOCKET */

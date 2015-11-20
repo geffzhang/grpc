@@ -31,8 +31,8 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_CHANNEL_CONNECTED_CHANNEL_H__
-#define __GRPC_INTERNAL_CHANNEL_CONNECTED_CHANNEL_H__
+#ifndef GRPC_INTERNAL_CORE_CHANNEL_CONNECTED_CHANNEL_H
+#define GRPC_INTERNAL_CORE_CHANNEL_CONNECTED_CHANNEL_H
 
 #include "src/core/channel/channel_stack.h"
 
@@ -43,7 +43,9 @@ extern const grpc_channel_filter grpc_connected_channel_filter;
 
 /* Post construction fixup: set the transport in the connected channel.
    Must be called before any call stack using this filter is used. */
-grpc_transport_setup_result grpc_connected_channel_bind_transport(
-    grpc_channel_stack *channel_stack, grpc_transport *transport);
+void grpc_connected_channel_bind_transport(grpc_channel_stack* channel_stack,
+                                           grpc_transport* transport);
 
-#endif /* __GRPC_INTERNAL_CHANNEL_CONNECTED_CHANNEL_H__ */
+grpc_stream* grpc_connected_channel_get_stream(grpc_call_element* elem);
+
+#endif /* GRPC_INTERNAL_CORE_CHANNEL_CONNECTED_CHANNEL_H */

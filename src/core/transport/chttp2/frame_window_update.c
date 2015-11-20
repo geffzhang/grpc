@@ -32,6 +32,7 @@
  */
 
 #include "src/core/transport/chttp2/frame_window_update.h"
+#include "src/core/transport/chttp2/internal.h"
 
 #include <grpc/support/log.h>
 
@@ -47,14 +48,14 @@ gpr_slice grpc_chttp2_window_update_create(gpr_uint32 id,
   *p++ = 4;
   *p++ = GRPC_CHTTP2_FRAME_WINDOW_UPDATE;
   *p++ = 0;
-  *p++ = id >> 24;
-  *p++ = id >> 16;
-  *p++ = id >> 8;
-  *p++ = id;
-  *p++ = window_update >> 24;
-  *p++ = window_update >> 16;
-  *p++ = window_update >> 8;
-  *p++ = window_update;
+  *p++ = (gpr_uint8)(id >> 24);
+  *p++ = (gpr_uint8)(id >> 16);
+  *p++ = (gpr_uint8)(id >> 8);
+  *p++ = (gpr_uint8)(id);
+  *p++ = (gpr_uint8)(window_update >> 24);
+  *p++ = (gpr_uint8)(window_update >> 16);
+  *p++ = (gpr_uint8)(window_update >> 8);
+  *p++ = (gpr_uint8)(window_update);
 
   return slice;
 }
@@ -73,26 +74,40 @@ grpc_chttp2_parse_error grpc_chttp2_window_update_parser_begin_frame(
 }
 
 grpc_chttp2_parse_error grpc_chttp2_window_update_parser_parse(
-    void *parser, grpc_chttp2_parse_state *state, gpr_slice slice,
-    int is_last) {
+    grpc_exec_ctx *exec_ctx, void *parser,
+    grpc_chttp2_transport_parsing *transport_parsing,
+    grpc_chttp2_stream_parsing *stream_parsing, gpr_slice slice, int is_last) {
   gpr_uint8 *const beg = GPR_SLICE_START_PTR(slice);
   gpr_uint8 *const end = GPR_SLICE_END_PTR(slice);
   gpr_uint8 *cur = beg;
   grpc_chttp2_window_update_parser *p = parser;
 
   while (p->byte != 4 && cur != end) {
-    p->amount |= ((gpr_uint32) * cur) << (8 * (3 - p->byte));
+    p->amount |= ((gpr_uint32)*cur) << (8 * (3 - p->byte));
     cur++;
     p->byte++;
   }
 
   if (p->byte == 4) {
-    if (p->amount == 0 || (p->amount & 0x80000000u)) {
+    gpr_uint32 received_update = p->amount;
+    if (received_update == 0 || (received_update & 0x80000000u)) {
       gpr_log(GPR_ERROR, "invalid window update bytes: %d", p->amount);
       return GRPC_CHTTP2_CONNECTION_ERROR;
     }
     GPR_ASSERT(is_last);
-    state->window_update = p->amount;
+
+    if (transport_parsing->incoming_stream_id != 0) {
+      if (stream_parsing != NULL) {
+        GRPC_CHTTP2_FLOW_CREDIT_STREAM("parse", transport_parsing,
+                                       stream_parsing, outgoing_window,
+                                       received_update);
+        grpc_chttp2_list_add_parsing_seen_stream(transport_parsing,
+                                                 stream_parsing);
+      }
+    } else {
+      GRPC_CHTTP2_FLOW_CREDIT_TRANSPORT("parse", transport_parsing,
+                                        outgoing_window, received_update);
+    }
   }
 
   return GRPC_CHTTP2_PARSE_OK;

@@ -35,26 +35,21 @@
 //
 
 #include <memory>
-#include <string>
+
+#include "src/compiler/config.h"
 
 #include "src/compiler/cpp_generator.h"
 #include "src/compiler/cpp_generator_helpers.h"
-#include <google/protobuf/descriptor.h>
-#include <google/protobuf/descriptor.pb.h>
-#include <google/protobuf/compiler/code_generator.h>
-#include <google/protobuf/compiler/plugin.h>
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream.h>
 
-class CppGrpcGenerator : public google::protobuf::compiler::CodeGenerator {
+class CppGrpcGenerator : public grpc::protobuf::compiler::CodeGenerator {
  public:
   CppGrpcGenerator() {}
   virtual ~CppGrpcGenerator() {}
 
-  virtual bool Generate(const google::protobuf::FileDescriptor *file,
-                        const std::string &parameter,
-                        google::protobuf::compiler::GeneratorContext *context,
-                        std::string *error) const {
+  virtual bool Generate(const grpc::protobuf::FileDescriptor *file,
+                        const grpc::string &parameter,
+                        grpc::protobuf::compiler::GeneratorContext *context,
+                        grpc::string *error) const {
     if (file->options().cc_generic_services()) {
       *error =
           "cpp grpc proto compiler plugin does not work with generic "
@@ -63,35 +58,65 @@ class CppGrpcGenerator : public google::protobuf::compiler::CodeGenerator {
       return false;
     }
 
-    std::string file_name = grpc_cpp_generator::StripProto(file->name());
+    grpc_cpp_generator::Parameters generator_parameters;
 
-    // Generate .pb.h
-    Insert(context, file_name + ".pb.h", "includes",
-           grpc_cpp_generator::GetHeaderIncludes(file));
-    Insert(context, file_name + ".pb.h", "namespace_scope",
-           grpc_cpp_generator::GetHeaderServices(file));
-    // Generate .pb.cc
-    Insert(context, file_name + ".pb.cc", "includes",
-           grpc_cpp_generator::GetSourceIncludes());
-    Insert(context, file_name + ".pb.cc", "namespace_scope",
-           grpc_cpp_generator::GetSourceServices(file));
+    if (!parameter.empty()) {
+      std::vector<grpc::string> parameters_list =
+        grpc_generator::tokenize(parameter, ",");
+      for (auto parameter_string = parameters_list.begin();
+           parameter_string != parameters_list.end();
+           parameter_string++) {
+        std::vector<grpc::string> param =
+          grpc_generator::tokenize(*parameter_string, "=");
+        if (param[0] == "services_namespace") {
+          generator_parameters.services_namespace = param[1];
+        } else {
+          *error = grpc::string("Unknown parameter: ") + *parameter_string;
+          return false;
+        }
+      }
+    }
+
+    grpc::string file_name = grpc_generator::StripProto(file->name());
+
+    grpc::string header_code =
+        grpc_cpp_generator::GetHeaderPrologue(file, generator_parameters) +
+        grpc_cpp_generator::GetHeaderIncludes(file, generator_parameters) +
+        grpc_cpp_generator::GetHeaderServices(file, generator_parameters) +
+        grpc_cpp_generator::GetHeaderEpilogue(file, generator_parameters);
+    std::unique_ptr<grpc::protobuf::io::ZeroCopyOutputStream> header_output(
+        context->Open(file_name + ".grpc.pb.h"));
+    grpc::protobuf::io::CodedOutputStream header_coded_out(
+        header_output.get());
+    header_coded_out.WriteRaw(header_code.data(), header_code.size());
+
+    grpc::string source_code =
+        grpc_cpp_generator::GetSourcePrologue(file, generator_parameters) +
+        grpc_cpp_generator::GetSourceIncludes(file, generator_parameters) +
+        grpc_cpp_generator::GetSourceServices(file, generator_parameters) +
+        grpc_cpp_generator::GetSourceEpilogue(file, generator_parameters);
+    std::unique_ptr<grpc::protobuf::io::ZeroCopyOutputStream> source_output(
+        context->Open(file_name + ".grpc.pb.cc"));
+    grpc::protobuf::io::CodedOutputStream source_coded_out(
+        source_output.get());
+    source_coded_out.WriteRaw(source_code.data(), source_code.size());
 
     return true;
   }
 
  private:
   // Insert the given code into the given file at the given insertion point.
-  void Insert(google::protobuf::compiler::GeneratorContext *context,
-              const std::string &filename, const std::string &insertion_point,
-              const std::string &code) const {
-    std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> output(
+  void Insert(grpc::protobuf::compiler::GeneratorContext *context,
+              const grpc::string &filename, const grpc::string &insertion_point,
+              const grpc::string &code) const {
+    std::unique_ptr<grpc::protobuf::io::ZeroCopyOutputStream> output(
         context->OpenForInsert(filename, insertion_point));
-    google::protobuf::io::CodedOutputStream coded_out(output.get());
+    grpc::protobuf::io::CodedOutputStream coded_out(output.get());
     coded_out.WriteRaw(code.data(), code.size());
   }
 };
 
 int main(int argc, char *argv[]) {
   CppGrpcGenerator generator;
-  return google::protobuf::compiler::PluginMain(argc, argv, &generator);
+  return grpc::protobuf::compiler::PluginMain(argc, argv, &generator);
 }

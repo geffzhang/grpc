@@ -31,21 +31,28 @@
  *
  */
 
-#ifndef __GRPC_INTERNAL_IOMGR_IOMGR_INTERNAL_H_
-#define __GRPC_INTERNAL_IOMGR_IOMGR_INTERNAL_H_
+#ifndef GRPC_INTERNAL_CORE_IOMGR_IOMGR_INTERNAL_H
+#define GRPC_INTERNAL_CORE_IOMGR_IOMGR_INTERNAL_H
 
 #include "src/core/iomgr/iomgr.h"
-#include "src/core/iomgr/iomgr_internal.h"
 #include <grpc/support/sync.h>
 
-int grpc_maybe_call_delayed_callbacks(gpr_mu *drop_mu, int success);
-void grpc_iomgr_add_delayed_callback(grpc_iomgr_cb_func cb, void *cb_arg,
-                                     int success);
+typedef struct grpc_iomgr_object {
+  char *name;
+  struct grpc_iomgr_object *next;
+  struct grpc_iomgr_object *prev;
+} grpc_iomgr_object;
 
-void grpc_iomgr_ref(void);
-void grpc_iomgr_unref(void);
+void grpc_pollset_global_init(void);
+void grpc_pollset_global_shutdown(void);
+
+void grpc_iomgr_register_object(grpc_iomgr_object *obj, const char *name);
+void grpc_iomgr_unregister_object(grpc_iomgr_object *obj);
 
 void grpc_iomgr_platform_init(void);
+/** flush any globally queued work from iomgr */
+void grpc_iomgr_platform_flush(void);
+/** tear down all platform specific global iomgr structures */
 void grpc_iomgr_platform_shutdown(void);
 
-#endif /* __GRPC_INTERNAL_IOMGR_IOMGR_INTERNAL_H_ */
+#endif /* GRPC_INTERNAL_CORE_IOMGR_IOMGR_INTERNAL_H */

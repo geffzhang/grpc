@@ -32,46 +32,67 @@
  */
 
 #include <grpc/support/port_platform.h>
-#include <grpc/support/alloc.h>
-#include <grpc/support/log.h>
 
 #ifdef GPR_WINSOCK_SOCKET
 
+#include <winsock2.h>
+#include <mswsock.h>
+
+#include <grpc/support/alloc.h>
+#include <grpc/support/log.h>
+#include <grpc/support/log_win32.h>
+#include <grpc/support/string_util.h>
+
 #include "src/core/iomgr/iocp_windows.h"
-#include "src/core/iomgr/iomgr.h"
 #include "src/core/iomgr/iomgr_internal.h"
-#include "src/core/iomgr/socket_windows.h"
 #include "src/core/iomgr/pollset.h"
 #include "src/core/iomgr/pollset_windows.h"
+#include "src/core/iomgr/socket_windows.h"
 
-grpc_winsocket *grpc_winsocket_create(SOCKET socket) {
+grpc_winsocket *grpc_winsocket_create(SOCKET socket, const char *name) {
+  char *final_name;
   grpc_winsocket *r = gpr_malloc(sizeof(grpc_winsocket));
-  gpr_log(GPR_DEBUG, "grpc_winsocket_create");
   memset(r, 0, sizeof(grpc_winsocket));
   r->socket = socket;
   gpr_mu_init(&r->state_mu);
-  grpc_iomgr_ref();
+  gpr_asprintf(&final_name, "%s:socket=0x%p", name, r);
+  grpc_iomgr_register_object(&r->iomgr_object, final_name);
+  gpr_free(final_name);
   grpc_iocp_add_socket(r);
   return r;
 }
 
-void shutdown_op(grpc_winsocket_callback_info *info) {
-  if (!info->cb) return;
-  grpc_iomgr_add_delayed_callback(info->cb, info->opaque, 0);
+/* Schedule a shutdown of the socket operations. Will call the pending
+   operations to abort them. We need to do that this way because of the
+   various callsites of that function, which happens to be in various
+   mutex hold states, and that'd be unsafe to call them directly. */
+void grpc_winsocket_shutdown(grpc_winsocket *winsocket) {
+  /* Grab the function pointer for DisconnectEx for that specific socket.
+     It may change depending on the interface. */
+  int status;
+  GUID guid = WSAID_DISCONNECTEX;
+  LPFN_DISCONNECTEX DisconnectEx;
+  DWORD ioctl_num_bytes;
+
+  status = WSAIoctl(winsocket->socket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+                    &guid, sizeof(guid), &DisconnectEx, sizeof(DisconnectEx),
+                    &ioctl_num_bytes, NULL, NULL);
+
+  if (status == 0) {
+    DisconnectEx(winsocket->socket, NULL, 0, 0);
+  } else {
+    char *utf8_message = gpr_format_message(WSAGetLastError());
+    gpr_log(GPR_ERROR, "Unable to retrieve DisconnectEx pointer : %s",
+            utf8_message);
+    gpr_free(utf8_message);
+  }
+  closesocket(winsocket->socket);
 }
 
-void grpc_winsocket_shutdown(grpc_winsocket *socket) {
-  gpr_log(GPR_DEBUG, "grpc_winsocket_shutdown");
-  shutdown_op(&socket->read_info);
-  shutdown_op(&socket->write_info);
+void grpc_winsocket_destroy(grpc_winsocket *winsocket) {
+  grpc_iomgr_unregister_object(&winsocket->iomgr_object);
+  gpr_mu_destroy(&winsocket->state_mu);
+  gpr_free(winsocket);
 }
 
-void grpc_winsocket_orphan(grpc_winsocket *socket) {
-  gpr_log(GPR_DEBUG, "grpc_winsocket_orphan");
-  grpc_iomgr_unref();
-  closesocket(socket->socket);
-  gpr_mu_destroy(&socket->state_mu);
-  gpr_free(socket);
-}
-
-#endif  /* GPR_WINSOCK_SOCKET */
+#endif /* GPR_WINSOCK_SOCKET */

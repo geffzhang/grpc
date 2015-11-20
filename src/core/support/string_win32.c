@@ -37,12 +37,13 @@
 
 #ifdef GPR_WIN32
 
-#include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 
 #include <grpc/support/alloc.h>
+
+#include "src/core/support/string.h"
 
 int gpr_asprintf(char **strp, const char *format, ...) {
   va_list args;
@@ -53,7 +54,7 @@ int gpr_asprintf(char **strp, const char *format, ...) {
   va_start(args, format);
   ret = _vscprintf(format, args);
   va_end(args);
-  if (!(0 <= ret && ret < ~(size_t)0)) {
+  if (ret < 0) {
     *strp = NULL;
     return -1;
   }
@@ -69,7 +70,7 @@ int gpr_asprintf(char **strp, const char *format, ...) {
   va_start(args, format);
   ret = vsnprintf_s(*strp, strp_buflen, _TRUNCATE, format, args);
   va_end(args);
-  if (ret == strp_buflen - 1) {
+  if ((size_t)ret == strp_buflen - 1) {
     return ret;
   }
 
@@ -80,7 +81,8 @@ int gpr_asprintf(char **strp, const char *format, ...) {
 }
 
 #if defined UNICODE || defined _UNICODE
-LPTSTR gpr_char_to_tchar(LPCSTR input) {
+LPTSTR
+gpr_char_to_tchar(LPCSTR input) {
   LPTSTR ret;
   int needed = MultiByteToWideChar(CP_UTF8, 0, input, -1, NULL, 0);
   if (needed == 0) return NULL;
@@ -89,7 +91,8 @@ LPTSTR gpr_char_to_tchar(LPCSTR input) {
   return ret;
 }
 
-LPSTR gpr_tchar_to_char(LPCTSTR input) {
+LPSTR
+gpr_tchar_to_char(LPCTSTR input) {
   LPSTR ret;
   int needed = WideCharToMultiByte(CP_UTF8, 0, input, -1, NULL, 0, NULL, NULL);
   if (needed == 0) return NULL;
@@ -98,13 +101,9 @@ LPSTR gpr_tchar_to_char(LPCTSTR input) {
   return ret;
 }
 #else
-char *gpr_tchar_to_char(LPTSTR input) {
-  return gpr_strdup(input);
-}
+char *gpr_tchar_to_char(LPTSTR input) { return gpr_strdup(input); }
 
-char *gpr_char_to_tchar(LPTSTR input) {
-  return gpr_strdup(input);
-}
+char *gpr_char_to_tchar(LPTSTR input) { return gpr_strdup(input); }
 #endif
 
 #endif /* GPR_WIN32 */
