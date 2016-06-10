@@ -46,39 +46,23 @@ namespace Grpc.Core.Internal
         const long NanosPerTick = 100;
         const long TicksPerSecond = NanosPerSecond / NanosPerTick;
 
+        static readonly NativeMethods Native = NativeMethods.Get();
         static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
 
-        [DllImport("grpc_csharp_ext.dll")]
-        static extern Timespec gprsharp_now(GPRClockType clockType);
-
-        [DllImport("grpc_csharp_ext.dll")]
-        static extern Timespec gprsharp_inf_future(GPRClockType clockType);
-
-        [DllImport("grpc_csharp_ext.dll")]
-        static extern Timespec gprsharp_inf_past(GPRClockType clockType);
-
-        [DllImport("grpc_csharp_ext.dll")]
-        static extern Timespec gprsharp_convert_clock_type(Timespec t, GPRClockType targetClock);
-
-        [DllImport("grpc_csharp_ext.dll")]
-        static extern int gprsharp_sizeof_timespec();
-
-        public Timespec(IntPtr tv_sec, int tv_nsec) : this(tv_sec, tv_nsec, GPRClockType.Realtime)
+        public Timespec(long tv_sec, int tv_nsec) : this(tv_sec, tv_nsec, ClockType.Realtime)
         {
         }
 
-        public Timespec(IntPtr tv_sec, int tv_nsec, GPRClockType clock_type)
+        public Timespec(long tv_sec, int tv_nsec, ClockType clock_type)
         {
             this.tv_sec = tv_sec;
             this.tv_nsec = tv_nsec;
             this.clock_type = clock_type;
         }
 
-        // NOTE: on linux 64bit  sizeof(gpr_timespec) = 16, on windows 32bit sizeof(gpr_timespec) = 8
-        // so IntPtr seems to have the right size to work on both.
-        private System.IntPtr tv_sec;
+        private long tv_sec;
         private int tv_nsec;
-        private GPRClockType clock_type;
+        private ClockType clock_type;
 
         /// <summary>
         /// Timespec a long time in the future.
@@ -87,7 +71,7 @@ namespace Grpc.Core.Internal
         {
             get
             {
-                return gprsharp_inf_future(GPRClockType.Realtime);
+                return new Timespec(long.MaxValue, 0, ClockType.Realtime);
             }
         }
 
@@ -98,7 +82,7 @@ namespace Grpc.Core.Internal
         {
             get
             {
-                return gprsharp_inf_past(GPRClockType.Realtime);
+                return new Timespec(long.MinValue, 0, ClockType.Realtime);
             }
         }
 
@@ -109,14 +93,14 @@ namespace Grpc.Core.Internal
         {
             get
             {
-                return gprsharp_now(GPRClockType.Realtime);
+                return Native.gprsharp_now(ClockType.Realtime);
             }
         }
 
         /// <summary>
         /// Seconds since unix epoch.
         /// </summary>
-        public IntPtr TimevalSeconds
+        public long TimevalSeconds
         {
             get
             {
@@ -138,9 +122,9 @@ namespace Grpc.Core.Internal
         /// <summary>
         /// Converts the timespec to desired clock type.
         /// </summary>
-        public Timespec ToClockType(GPRClockType targetClock)
+        public Timespec ToClockType(ClockType targetClock)
         {
-            return gprsharp_convert_clock_type(this, targetClock);
+            return Native.gprsharp_convert_clock_type(this, targetClock);
         }
             
         /// <summary>
@@ -157,8 +141,8 @@ namespace Grpc.Core.Internal
         /// </summary>
         public DateTime ToDateTime()
         {
-            Preconditions.CheckState(tv_nsec >= 0 && tv_nsec < NanosPerSecond);
-            Preconditions.CheckState(clock_type == GPRClockType.Realtime);
+            GrpcPreconditions.CheckState(tv_nsec >= 0 && tv_nsec < NanosPerSecond);
+            GrpcPreconditions.CheckState(clock_type == ClockType.Realtime);
 
             // fast path for InfFuture
             if (this.Equals(InfFuture))
@@ -176,18 +160,18 @@ namespace Grpc.Core.Internal
             {
                 // convert nanos to ticks, round up to the nearest tick
                 long ticksFromNanos = tv_nsec / NanosPerTick + ((tv_nsec % NanosPerTick != 0) ? 1 : 0);
-                long ticksTotal = checked(tv_sec.ToInt64() * TicksPerSecond + ticksFromNanos);
+                long ticksTotal = checked(tv_sec * TicksPerSecond + ticksFromNanos);
                 return UnixEpoch.AddTicks(ticksTotal);
             }
             catch (OverflowException)
             {
                 // ticks out of long range
-                return tv_sec.ToInt64() > 0 ? DateTime.MaxValue : DateTime.MinValue;
+                return tv_sec > 0 ? DateTime.MaxValue : DateTime.MinValue;
             }
             catch (ArgumentOutOfRangeException)
             {
                 // resulting date time would be larger than MaxValue
-                return tv_sec.ToInt64() > 0 ? DateTime.MaxValue : DateTime.MinValue;
+                return tv_sec > 0 ? DateTime.MaxValue : DateTime.MinValue;
             }
         }
             
@@ -211,7 +195,7 @@ namespace Grpc.Core.Internal
                 return Timespec.InfPast;
             }
 
-            Preconditions.CheckArgument(dateTime.Kind == DateTimeKind.Utc, "dateTime needs of kind DateTimeKind.Utc or be equal to DateTime.MaxValue or DateTime.MinValue.");
+            GrpcPreconditions.CheckArgument(dateTime.Kind == DateTimeKind.Utc, "dateTime needs of kind DateTimeKind.Utc or be equal to DateTime.MaxValue or DateTime.MinValue.");
 
             try
             {
@@ -226,12 +210,7 @@ namespace Grpc.Core.Internal
                     seconds--;
                     nanos += (int)NanosPerSecond;
                 }
-                // new IntPtr possibly throws OverflowException
-                return new Timespec(new IntPtr(seconds), nanos);
-            }
-            catch (OverflowException)
-            {
-                return dateTime > UnixEpoch ? Timespec.InfFuture : Timespec.InfPast;
+                return new Timespec(seconds, nanos);
             }
             catch (ArgumentOutOfRangeException)
             {
@@ -248,15 +227,34 @@ namespace Grpc.Core.Internal
         {
             get
             {
-                return gprsharp_now(GPRClockType.Precise);
+                return Native.gprsharp_now(ClockType.Precise);
             }
         }
 
+        // for tests only
         internal static int NativeSize
         {
             get
             {
-                return gprsharp_sizeof_timespec();
+                return Native.gprsharp_sizeof_timespec();
+            }
+        }
+
+        // for tests only
+        internal static Timespec NativeInfFuture
+        {
+            get
+            {
+                return Native.gprsharp_inf_future(ClockType.Realtime);
+            }
+        }
+
+        // for tests only
+        public static Timespec NativeInfPast
+        {
+            get
+            {
+                return Native.gprsharp_inf_past(ClockType.Realtime);
             }
         }
     }

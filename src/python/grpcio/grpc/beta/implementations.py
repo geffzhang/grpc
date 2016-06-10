@@ -1,4 +1,4 @@
-# Copyright 2015, Google Inc.
+# Copyright 2015-2016, Google Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -35,50 +35,36 @@ import enum
 import threading  # pylint: disable=unused-import
 
 # cardinality and face are referenced from specification in this module.
-from grpc._adapter import _intermediary_low
+import grpc
+from grpc import _auth
 from grpc._adapter import _types
-from grpc.beta import _connectivity_channel
-from grpc.beta import _server
-from grpc.beta import _stub
+from grpc.beta import _client_adaptations
+from grpc.beta import _server_adaptations
 from grpc.beta import interfaces
 from grpc.framework.common import cardinality  # pylint: disable=unused-import
 from grpc.framework.interfaces.face import face  # pylint: disable=unused-import
 
-_CHANNEL_SUBSCRIPTION_CALLBACK_ERROR_LOG_MESSAGE = (
-    'Exception calling channel subscription callback!')
+
+ChannelCredentials = grpc.ChannelCredentials
+ssl_channel_credentials = grpc.ssl_channel_credentials
+CallCredentials = grpc.CallCredentials
+metadata_call_credentials = grpc.metadata_call_credentials
 
 
-class ClientCredentials(object):
-  """A value encapsulating the data required to create a secure Channel.
-
-  This class and its instances have no supported interface - it exists to define
-  the type of its instances and its instances exist to be passed to other
-  functions.
-  """
-
-  def __init__(self, low_credentials, intermediary_low_credentials):
-    self._low_credentials = low_credentials
-    self._intermediary_low_credentials = intermediary_low_credentials
-
-
-def ssl_client_credentials(root_certificates, private_key, certificate_chain):
-  """Creates a ClientCredentials for use with an SSL-enabled Channel.
+def google_call_credentials(credentials):
+  """Construct CallCredentials from GoogleCredentials.
 
   Args:
-    root_certificates: The PEM-encoded root certificates or None to ask for
-      them to be retrieved from a default location.
-    private_key: The PEM-encoded private key to use or None if no private key
-      should be used.
-    certificate_chain: The PEM-encoded certificate chain to use or None if no
-      certificate chain should be used.
+    credentials: A GoogleCredentials object from the oauth2client library.
 
   Returns:
-    A ClientCredentials for use with an SSL-enabled Channel.
+    A CallCredentials object for use in a GRPCCallOptions object.
   """
-  intermediary_low_credentials = _intermediary_low.ClientCredentials(
-      root_certificates, private_key, certificate_chain)
-  return ClientCredentials(
-      intermediary_low_credentials._internal, intermediary_low_credentials)  # pylint: disable=protected-access
+  return metadata_call_credentials(_auth.GoogleCallCredentials(credentials))
+
+access_token_call_credentials = grpc.access_token_call_credentials
+composite_call_credentials = grpc.composite_call_credentials
+composite_channel_credentials = grpc.composite_channel_credentials
 
 
 class Channel(object):
@@ -89,11 +75,8 @@ class Channel(object):
   unsupported.
   """
 
-  def __init__(self, low_channel, intermediary_low_channel):
-    self._low_channel = low_channel
-    self._intermediary_low_channel = intermediary_low_channel
-    self._connectivity_channel = _connectivity_channel.ConnectivityChannel(
-        low_channel)
+  def __init__(self, channel):
+    self._channel = channel
 
   def subscribe(self, callback, try_to_connect=None):
     """Subscribes to this Channel's connectivity.
@@ -108,7 +91,7 @@ class Channel(object):
         attempt to connect if it is not already connected and ready to conduct
         RPCs.
     """
-    self._connectivity_channel.subscribe(callback, try_to_connect)
+    self._channel.subscribe(callback, try_to_connect=try_to_connect)
 
   def unsubscribe(self, callback):
     """Unsubscribes a callback from this Channel's connectivity.
@@ -117,7 +100,7 @@ class Channel(object):
       callback: A callable previously registered with this Channel from having
         been passed to its "subscribe" method.
     """
-    self._connectivity_channel.unsubscribe(callback)
+    self._channel.unsubscribe(callback)
 
 
 def insecure_channel(host, port):
@@ -126,29 +109,31 @@ def insecure_channel(host, port):
   Args:
     host: The name of the remote host to which to connect.
     port: The port of the remote host to which to connect.
+      If None only the 'host' part will be used.
 
   Returns:
     A Channel to the remote host through which RPCs may be conducted.
   """
-  intermediary_low_channel = _intermediary_low.Channel(
-      '%s:%d' % (host, port), None)
-  return Channel(intermediary_low_channel._internal, intermediary_low_channel)  # pylint: disable=protected-access
+  channel = grpc.insecure_channel(
+      host if port is None else '%s:%d' % (host, port))
+  return Channel(channel)
 
 
-def secure_channel(host, port, client_credentials):
+def secure_channel(host, port, channel_credentials):
   """Creates a secure Channel to a remote host.
 
   Args:
     host: The name of the remote host to which to connect.
     port: The port of the remote host to which to connect.
-    client_credentials: A ClientCredentials.
+      If None only the 'host' part will be used.
+    channel_credentials: A ChannelCredentials.
 
   Returns:
     A secure Channel to the remote host through which RPCs may be conducted.
   """
-  intermediary_low_channel = _intermediary_low.Channel(
-      '%s:%d' % (host, port), client_credentials._intermediary_low_credentials)
-  return Channel(intermediary_low_channel._internal, intermediary_low_channel)  # pylint: disable=protected-access
+  channel = grpc.secure_channel(
+      host if port is None else '%s:%d' % (host, port), channel_credentials)
+  return Channel(channel)
 
 
 class StubOptions(object):
@@ -212,12 +197,11 @@ def generic_stub(channel, options=None):
     A face.GenericStub on which RPCs can be made.
   """
   effective_options = _EMPTY_STUB_OPTIONS if options is None else options
-  return _stub.generic_stub(
-      channel._intermediary_low_channel, effective_options.host,  # pylint: disable=protected-access
-      effective_options.metadata_transformer,
+  return _client_adaptations.generic_stub(
+      channel._channel,  # pylint: disable=protected-access
+      effective_options.host, effective_options.metadata_transformer,
       effective_options.request_serializers,
-      effective_options.response_deserializers, effective_options.thread_pool,
-      effective_options.thread_pool_size)
+      effective_options.response_deserializers)
 
 
 def dynamic_stub(channel, service, cardinalities, options=None):
@@ -235,58 +219,16 @@ def dynamic_stub(channel, service, cardinalities, options=None):
     A face.DynamicStub with which RPCs can be invoked.
   """
   effective_options = StubOptions() if options is None else options
-  return _stub.dynamic_stub(
-      channel._intermediary_low_channel, effective_options.host, service,  # pylint: disable=protected-access
-      cardinalities, effective_options.metadata_transformer,
+  return _client_adaptations.dynamic_stub(
+      channel._channel,  # pylint: disable=protected-access
+      service, cardinalities, effective_options.host,
+      effective_options.metadata_transformer,
       effective_options.request_serializers,
-      effective_options.response_deserializers, effective_options.thread_pool,
-      effective_options.thread_pool_size)
+      effective_options.response_deserializers)
 
 
-class ServerCredentials(object):
-  """A value encapsulating the data required to open a secure port on a Server.
-
-  This class and its instances have no supported interface - it exists to define
-  the type of its instances and its instances exist to be passed to other
-  functions.
-  """
-
-  def __init__(self, low_credentials, intermediary_low_credentials):
-    self._low_credentials = low_credentials
-    self._intermediary_low_credentials = intermediary_low_credentials
-
-
-def ssl_server_credentials(
-    private_key_certificate_chain_pairs, root_certificates=None,
-    require_client_auth=False):
-  """Creates a ServerCredentials for use with an SSL-enabled Server.
-
-  Args:
-    private_key_certificate_chain_pairs: A nonempty sequence each element of
-      which is a pair the first element of which is a PEM-encoded private key
-      and the second element of which is the corresponding PEM-encoded
-      certificate chain.
-    root_certificates: PEM-encoded client root certificates to be used for
-      verifying authenticated clients. If omitted, require_client_auth must also
-      be omitted or be False.
-    require_client_auth: A boolean indicating whether or not to require clients
-      to be authenticated. May only be True if root_certificates is not None.
-
-  Returns:
-    A ServerCredentials for use with an SSL-enabled Server.
-  """
-  if len(private_key_certificate_chain_pairs) == 0:
-    raise ValueError(
-        'At least one private key-certificate chain pairis required!')
-  elif require_client_auth and root_certificates is None:
-    raise ValueError(
-        'Illegal to require client auth without providing root certificates!')
-  else:
-    intermediary_low_credentials = _intermediary_low.ServerCredentials(
-        root_certificates, private_key_certificate_chain_pairs,
-        require_client_auth)
-    return ServerCredentials(
-        intermediary_low_credentials._internal, intermediary_low_credentials)  # pylint: disable=protected-access
+ServerCredentials = grpc.ServerCredentials
+ssl_server_credentials = grpc.ssl_server_credentials
 
 
 class ServerOptions(object):
@@ -359,9 +301,8 @@ def server(service_implementations, options=None):
     An interfaces.Server with which RPCs can be serviced.
   """
   effective_options = _EMPTY_SERVER_OPTIONS if options is None else options
-  return _server.server(
+  return _server_adaptations.server(
       service_implementations, effective_options.multi_method_implementation,
       effective_options.request_deserializers,
       effective_options.response_serializers, effective_options.thread_pool,
-      effective_options.thread_pool_size, effective_options.default_timeout,
-      effective_options.maximum_timeout)
+      effective_options.thread_pool_size)

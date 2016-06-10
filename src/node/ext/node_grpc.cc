@@ -35,6 +35,8 @@
 #include <nan.h>
 #include <v8.h>
 #include "grpc/grpc.h"
+#include "grpc/grpc_security.h"
+#include "grpc/support/alloc.h"
 
 #include "call.h"
 #include "call_credentials.h"
@@ -44,11 +46,14 @@
 #include "completion_queue_async_worker.h"
 #include "server_credentials.h"
 
+using v8::FunctionTemplate;
 using v8::Local;
 using v8::Value;
 using v8::Object;
 using v8::Uint32;
 using v8::String;
+
+static char *pem_root_certs = NULL;
 
 void InitStatusConstants(Local<Object> exports) {
   Nan::HandleScope scope;
@@ -111,8 +116,8 @@ void InitCallErrorConstants(Local<Object> exports) {
   Nan::Set(exports, Nan::New("callError").ToLocalChecked(), call_error);
   Local<Value> OK(Nan::New<Uint32, uint32_t>(GRPC_CALL_OK));
   Nan::Set(call_error, Nan::New("OK").ToLocalChecked(), OK);
-  Local<Value> ERROR(Nan::New<Uint32, uint32_t>(GRPC_CALL_ERROR));
-  Nan::Set(call_error, Nan::New("ERROR").ToLocalChecked(), ERROR);
+  Local<Value> CALL_ERROR(Nan::New<Uint32, uint32_t>(GRPC_CALL_ERROR));
+  Nan::Set(call_error, Nan::New("ERROR").ToLocalChecked(), CALL_ERROR);
   Local<Value> NOT_ON_SERVER(
       Nan::New<Uint32, uint32_t>(GRPC_CALL_ERROR_NOT_ON_SERVER));
   Nan::Set(call_error, Nan::New("NOT_ON_SERVER").ToLocalChecked(),
@@ -215,7 +220,7 @@ void InitConnectivityStateConstants(Local<Object> exports) {
   Nan::Set(channel_state, Nan::New("TRANSIENT_FAILURE").ToLocalChecked(),
            TRANSIENT_FAILURE);
   Local<Value> FATAL_FAILURE(
-      Nan::New<Uint32, uint32_t>(GRPC_CHANNEL_FATAL_FAILURE));
+      Nan::New<Uint32, uint32_t>(GRPC_CHANNEL_SHUTDOWN));
   Nan::Set(channel_state, Nan::New("FATAL_FAILURE").ToLocalChecked(),
            FATAL_FAILURE);
 }
@@ -230,9 +235,73 @@ void InitWriteFlags(Local<Object> exports) {
   Nan::Set(write_flags, Nan::New("NO_COMPRESS").ToLocalChecked(), NO_COMPRESS);
 }
 
+NAN_METHOD(MetadataKeyIsLegal) {
+  if (!info[0]->IsString()) {
+    return Nan::ThrowTypeError(
+        "headerKeyIsLegal's argument must be a string");
+  }
+  Local<String> key = Nan::To<String>(info[0]).ToLocalChecked();
+  Nan::Utf8String key_utf8_str(key);
+  char *key_str = *key_utf8_str;
+  info.GetReturnValue().Set(static_cast<bool>(
+      grpc_header_key_is_legal(key_str, static_cast<size_t>(key->Length()))));
+}
+
+NAN_METHOD(MetadataNonbinValueIsLegal) {
+  if (!info[0]->IsString()) {
+    return Nan::ThrowTypeError(
+        "metadataNonbinValueIsLegal's argument must be a string");
+  }
+  Local<String> value = Nan::To<String>(info[0]).ToLocalChecked();
+  Nan::Utf8String value_utf8_str(value);
+  char *value_str = *value_utf8_str;
+  info.GetReturnValue().Set(static_cast<bool>(
+      grpc_header_nonbin_value_is_legal(
+          value_str, static_cast<size_t>(value->Length()))));
+}
+
+NAN_METHOD(MetadataKeyIsBinary) {
+  if (!info[0]->IsString()) {
+    return Nan::ThrowTypeError(
+        "metadataKeyIsLegal's argument must be a string");
+  }
+  Local<String> key = Nan::To<String>(info[0]).ToLocalChecked();
+  Nan::Utf8String key_utf8_str(key);
+  char *key_str = *key_utf8_str;
+  info.GetReturnValue().Set(static_cast<bool>(
+      grpc_is_binary_header(key_str, static_cast<size_t>(key->Length()))));
+}
+
+static grpc_ssl_roots_override_result get_ssl_roots_override(
+    char **pem_root_certs_ptr) {
+  *pem_root_certs_ptr = pem_root_certs;
+  if (pem_root_certs == NULL) {
+    return GRPC_SSL_ROOTS_OVERRIDE_FAIL;
+  } else {
+    return GRPC_SSL_ROOTS_OVERRIDE_OK;
+  }
+}
+
+/* This should only be called once, and only before creating any
+ *ServerCredentials */
+NAN_METHOD(SetDefaultRootsPem) {
+  if (!info[0]->IsString()) {
+    return Nan::ThrowTypeError(
+        "setDefaultRootsPem's argument must be a string");
+  }
+  Nan::Utf8String utf8_roots(info[0]);
+  size_t length = static_cast<size_t>(utf8_roots.length());
+  if (length > 0) {
+    const char *data = *utf8_roots;
+    pem_root_certs = (char *)gpr_malloc((length + 1) * sizeof(char));
+    memcpy(pem_root_certs, data, length + 1);
+  }
+}
+
 void init(Local<Object> exports) {
   Nan::HandleScope scope;
   grpc_init();
+  grpc_set_ssl_roots_override_callback(get_ssl_roots_override);
   InitStatusConstants(exports);
   InitCallErrorConstants(exports);
   InitOpTypeConstants(exports);
@@ -247,6 +316,23 @@ void init(Local<Object> exports) {
   grpc::node::Server::Init(exports);
   grpc::node::CompletionQueueAsyncWorker::Init(exports);
   grpc::node::ServerCredentials::Init(exports);
+
+  // Attach a few utility functions directly to the module
+  Nan::Set(exports, Nan::New("metadataKeyIsLegal").ToLocalChecked(),
+           Nan::GetFunction(
+               Nan::New<FunctionTemplate>(MetadataKeyIsLegal)).ToLocalChecked());
+  Nan::Set(exports, Nan::New("metadataNonbinValueIsLegal").ToLocalChecked(),
+           Nan::GetFunction(
+               Nan::New<FunctionTemplate>(MetadataNonbinValueIsLegal)
+                            ).ToLocalChecked());
+  Nan::Set(exports, Nan::New("metadataKeyIsBinary").ToLocalChecked(),
+           Nan::GetFunction(
+               Nan::New<FunctionTemplate>(MetadataKeyIsBinary)
+                            ).ToLocalChecked());
+  Nan::Set(exports, Nan::New("setDefaultRootsPem").ToLocalChecked(),
+           Nan::GetFunction(
+               Nan::New<FunctionTemplate>(SetDefaultRootsPem)
+                            ).ToLocalChecked());
 }
 
 NODE_MODULE(grpc_node, init)

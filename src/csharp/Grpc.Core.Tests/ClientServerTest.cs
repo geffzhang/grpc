@@ -32,6 +32,7 @@
 #endregion
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -92,7 +93,7 @@ namespace Grpc.Core.Tests
             var ex = Assert.Throws<RpcException>(() => Calls.BlockingUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unknown, ex.Status.StatusCode); 
 
-            var ex2 = Assert.Throws<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
+            var ex2 = Assert.ThrowsAsync<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unknown, ex2.Status.StatusCode);
         }
 
@@ -107,7 +108,7 @@ namespace Grpc.Core.Tests
             var ex = Assert.Throws<RpcException>(() => Calls.BlockingUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unauthenticated, ex.Status.StatusCode);
 
-            var ex2 = Assert.Throws<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
+            var ex2 = Assert.ThrowsAsync<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unauthenticated, ex2.Status.StatusCode);
         }
 
@@ -123,7 +124,7 @@ namespace Grpc.Core.Tests
             var ex = Assert.Throws<RpcException>(() => Calls.BlockingUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unauthenticated, ex.Status.StatusCode);
 
-            var ex2 = Assert.Throws<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
+            var ex2 = Assert.ThrowsAsync<RpcException>(async () => await Calls.AsyncUnaryCall(helper.CreateUnaryCall(), "abc"));
             Assert.AreEqual(StatusCode.Unauthenticated, ex2.Status.StatusCode);
         }
 
@@ -144,6 +145,76 @@ namespace Grpc.Core.Tests
             var call = Calls.AsyncClientStreamingCall(helper.CreateClientStreamingCall());
             await call.RequestStream.WriteAllAsync(new string[] { "A", "B", "C" });
             Assert.AreEqual("ABC", await call.ResponseAsync);
+
+            Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
+            Assert.IsNotNull(call.GetTrailers());
+        }
+
+        [Test]
+        public async Task ServerStreamingCall()
+        {
+            helper.ServerStreamingHandler = new ServerStreamingServerMethod<string, string>(async (request, responseStream, context) =>
+            {
+                await responseStream.WriteAllAsync(request.Split(new []{' '}));
+                context.ResponseTrailers.Add("xyz", "");
+            });
+
+            var call = Calls.AsyncServerStreamingCall(helper.CreateServerStreamingCall(), "A B C");
+            CollectionAssert.AreEqual(new string[] { "A", "B", "C" }, await call.ResponseStream.ToListAsync());
+
+            Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
+            Assert.IsNotNull("xyz", call.GetTrailers()[0].Key);
+        }
+
+        [Test]
+        public async Task ServerStreamingCall_EndOfStreamIsIdempotent()
+        {
+            helper.ServerStreamingHandler = new ServerStreamingServerMethod<string, string>(async (request, responseStream, context) =>
+            {
+            });
+
+            var call = Calls.AsyncServerStreamingCall(helper.CreateServerStreamingCall(), "");
+
+            Assert.IsFalse(await call.ResponseStream.MoveNext());
+            Assert.IsFalse(await call.ResponseStream.MoveNext());
+        }
+
+        [Test]
+        public async Task ServerStreamingCall_ErrorCanBeAwaitedTwice()
+        {
+            helper.ServerStreamingHandler = new ServerStreamingServerMethod<string, string>(async (request, responseStream, context) =>
+            {
+                context.Status = new Status(StatusCode.InvalidArgument, "");
+            });
+
+            var call = Calls.AsyncServerStreamingCall(helper.CreateServerStreamingCall(), "");
+
+            var ex = Assert.ThrowsAsync<RpcException>(async () => await call.ResponseStream.MoveNext());
+            Assert.AreEqual(StatusCode.InvalidArgument, ex.Status.StatusCode);
+
+            // attempting MoveNext again should result in throwing the same exception.
+            var ex2 = Assert.ThrowsAsync<RpcException>(async () => await call.ResponseStream.MoveNext());
+            Assert.AreEqual(StatusCode.InvalidArgument, ex2.Status.StatusCode);
+        }
+
+        [Test]
+        public async Task DuplexStreamingCall()
+        {
+            helper.DuplexStreamingHandler = new DuplexStreamingServerMethod<string, string>(async (requestStream, responseStream, context) =>
+            {
+                while (await requestStream.MoveNext())
+                {
+                    await responseStream.WriteAsync(requestStream.Current);
+                }
+                context.ResponseTrailers.Add("xyz", "xyz-value");
+            });
+
+            var call = Calls.AsyncDuplexStreamingCall(helper.CreateDuplexStreamingCall());
+            await call.RequestStream.WriteAllAsync(new string[] { "A", "B", "C" });
+            CollectionAssert.AreEqual(new string[] { "A", "B", "C" }, await call.ResponseStream.ToListAsync());
+
+            Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
+            Assert.IsNotNull("xyz-value", call.GetTrailers()[0].Value);
         }
 
         [Test]
@@ -164,8 +235,54 @@ namespace Grpc.Core.Tests
             await barrier.Task;  // make sure the handler has started.
             cts.Cancel();
 
-            var ex = Assert.Throws<RpcException>(async () => await call.ResponseAsync);
-            Assert.AreEqual(StatusCode.Cancelled, ex.Status.StatusCode);
+            try
+            {
+                // cannot use Assert.ThrowsAsync because it uses Task.Wait and would deadlock.
+                await call.ResponseAsync;
+                Assert.Fail();
+            }
+            catch (RpcException ex)
+            {
+                Assert.AreEqual(StatusCode.Cancelled, ex.Status.StatusCode);
+            }
+        }
+
+        [Test]
+        public async Task ClientStreamingCall_ServerSideReadAfterCancelNotificationReturnsNull()
+        {
+            var handlerStartedBarrier = new TaskCompletionSource<object>();
+            var cancelNotificationReceivedBarrier = new TaskCompletionSource<object>();
+            var successTcs = new TaskCompletionSource<string>();
+
+            helper.ClientStreamingHandler = new ClientStreamingServerMethod<string, string>(async (requestStream, context) =>
+            {
+                handlerStartedBarrier.SetResult(null);
+
+                // wait for cancellation to be delivered.
+                context.CancellationToken.Register(() => cancelNotificationReceivedBarrier.SetResult(null));
+                await cancelNotificationReceivedBarrier.Task;
+
+                var moveNextResult = await requestStream.MoveNext();
+                successTcs.SetResult(!moveNextResult ? "SUCCESS" : "FAIL");
+                return "";
+            });
+
+            var cts = new CancellationTokenSource();
+            var call = Calls.AsyncClientStreamingCall(helper.CreateClientStreamingCall(new CallOptions(cancellationToken: cts.Token)));
+
+            await handlerStartedBarrier.Task;
+            cts.Cancel();
+
+            try
+            {
+                await call.ResponseAsync;
+                Assert.Fail();
+            }
+            catch (RpcException ex)
+            {
+                Assert.AreEqual(StatusCode.Cancelled, ex.Status.StatusCode);
+            }
+            Assert.AreEqual("SUCCESS", await successTcs.Task);
         }
 
         [Test]
@@ -201,7 +318,7 @@ namespace Grpc.Core.Tests
             Assert.AreEqual(headers[1].Key, trailers[1].Key);
             CollectionAssert.AreEqual(headers[1].ValueBytes, trailers[1].ValueBytes);
         }
-            
+
         [Test]
         public void UnknownMethodHandler()
         {
@@ -219,19 +336,7 @@ namespace Grpc.Core.Tests
         }
 
         [Test]
-        public void UserAgentStringPresent()
-        {
-            helper.UnaryHandler = new UnaryServerMethod<string, string>(async (request, context) =>
-            {
-                return context.RequestHeaders.Where(entry => entry.Key == "user-agent").Single().Value;
-            });
-
-            string userAgent = Calls.BlockingUnaryCall(helper.CreateUnaryCall(), "abc");
-            Assert.IsTrue(userAgent.StartsWith("grpc-csharp/"));
-        }
-
-        [Test]
-        public void PeerInfoPresent()
+        public void ServerCallContext_PeerInfoPresent()
         {
             helper.UnaryHandler = new UnaryServerMethod<string, string>(async (request, context) =>
             {
@@ -243,6 +348,18 @@ namespace Grpc.Core.Tests
         }
 
         [Test]
+        public void ServerCallContext_HostAndMethodPresent()
+        {
+            helper.UnaryHandler = new UnaryServerMethod<string, string>(async (request, context) =>
+            {
+                Assert.IsTrue(context.Host.Contains(Host));
+                Assert.AreEqual("/tests.Test/Unary", context.Method);
+                return "PASS";
+            });
+            Assert.AreEqual("PASS", Calls.BlockingUnaryCall(helper.CreateUnaryCall(), "abc"));
+        }
+
+        [Test]
         public async Task Channel_WaitForStateChangedAsync()
         {
             helper.UnaryHandler = new UnaryServerMethod<string, string>(async (request, context) =>
@@ -250,7 +367,7 @@ namespace Grpc.Core.Tests
                 return request;
             });
 
-            Assert.Throws(typeof(TaskCanceledException), 
+            Assert.ThrowsAsync(typeof(TaskCanceledException), 
                 async () => await channel.WaitForStateChangedAsync(channel.State, DateTime.UtcNow.AddMilliseconds(10)));
 
             var stateChangedTask = channel.WaitForStateChangedAsync(channel.State);
