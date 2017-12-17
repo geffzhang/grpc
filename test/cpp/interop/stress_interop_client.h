@@ -1,33 +1,18 @@
 /*
  *
- * Copyright 2015, Google Inc.
- * All rights reserved.
+ * Copyright 2015 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *is % allowed in string
  */
 
@@ -51,29 +36,33 @@ using std::vector;
 
 enum TestCaseType {
   UNKNOWN_TEST = -1,
-  EMPTY_UNARY = 0,
-  LARGE_UNARY = 1,
-  LARGE_COMPRESSED_UNARY = 2,
-  CLIENT_STREAMING = 3,
-  SERVER_STREAMING = 4,
-  SERVER_COMPRESSED_STREAMING = 5,
-  SLOW_CONSUMER = 6,
-  HALF_DUPLEX = 7,
-  PING_PONG = 8,
-  CANCEL_AFTER_BEGIN = 9,
-  CANCEL_AFTER_FIRST_RESPONSE = 10,
-  TIMEOUT_ON_SLEEPING_SERVER = 11,
-  EMPTY_STREAM = 12,
-  STATUS_CODE_AND_MESSAGE = 13,
-  CUSTOM_METADATA = 14
+  EMPTY_UNARY,
+  LARGE_UNARY,
+  CLIENT_COMPRESSED_UNARY,
+  CLIENT_COMPRESSED_STREAMING,
+  CLIENT_STREAMING,
+  SERVER_STREAMING,
+  SERVER_COMPRESSED_UNARY,
+  SERVER_COMPRESSED_STREAMING,
+  SLOW_CONSUMER,
+  HALF_DUPLEX,
+  PING_PONG,
+  CANCEL_AFTER_BEGIN,
+  CANCEL_AFTER_FIRST_RESPONSE,
+  TIMEOUT_ON_SLEEPING_SERVER,
+  EMPTY_STREAM,
+  STATUS_CODE_AND_MESSAGE,
+  CUSTOM_METADATA
 };
 
 const vector<pair<TestCaseType, grpc::string>> kTestCaseList = {
     {EMPTY_UNARY, "empty_unary"},
     {LARGE_UNARY, "large_unary"},
-    {LARGE_COMPRESSED_UNARY, "large_compressed_unary"},
+    {CLIENT_COMPRESSED_UNARY, "client_compressed_unary"},
+    {CLIENT_COMPRESSED_STREAMING, "client_compressed_streaming"},
     {CLIENT_STREAMING, "client_streaming"},
     {SERVER_STREAMING, "server_streaming"},
+    {SERVER_COMPRESSED_UNARY, "server_compressed_unary"},
     {SERVER_COMPRESSED_STREAMING, "server_compressed_streaming"},
     {SLOW_CONSUMER, "slow_consumer"},
     {HALF_DUPLEX, "half_duplex"},

@@ -1,40 +1,22 @@
 /*
  *
- * Copyright 2015, Google Inc.
- * All rights reserved.
+ * Copyright 2015-2016 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
-#include "test/cpp/interop/interop_client.h"
-
-#include <unistd.h>
-
+#include <cinttypes>
 #include <fstream>
 #include <memory>
 
@@ -42,15 +24,18 @@
 #include <grpc++/client_context.h>
 #include <grpc++/security/credentials.h>
 #include <grpc/grpc.h>
+#include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 #include <grpc/support/string_util.h>
+#include <grpc/support/time.h>
 #include <grpc/support/useful.h>
 
 #include "src/core/lib/transport/byte_stream.h"
-#include "src/proto/grpc/testing/empty.grpc.pb.h"
-#include "src/proto/grpc/testing/messages.grpc.pb.h"
+#include "src/proto/grpc/testing/empty.pb.h"
+#include "src/proto/grpc/testing/messages.pb.h"
 #include "src/proto/grpc/testing/test.grpc.pb.h"
 #include "test/cpp/interop/client_helper.h"
+#include "test/cpp/interop/interop_client.h"
 
 namespace grpc {
 namespace testing {
@@ -58,7 +43,7 @@ namespace testing {
 namespace {
 // The same value is defined by the Java client.
 const std::vector<int> request_stream_sizes = {27182, 8, 1828, 45904};
-const std::vector<int> response_stream_sizes = {31415, 59, 2653, 58979};
+const std::vector<int> response_stream_sizes = {31415, 9, 2653, 58979};
 const int kNumResponseMessages = 2000;
 const int kResponseMessageSize = 1030;
 const int kReceiveDelayMilliSeconds = 20;
@@ -68,28 +53,23 @@ const int kLargeResponseSize = 314159;
 void NoopChecks(const InteropClientContextInspector& inspector,
                 const SimpleRequest* request, const SimpleResponse* response) {}
 
-void CompressionChecks(const InteropClientContextInspector& inspector,
-                       const SimpleRequest* request,
-                       const SimpleResponse* response) {
+void UnaryCompressionChecks(const InteropClientContextInspector& inspector,
+                            const SimpleRequest* request,
+                            const SimpleResponse* response) {
   const grpc_compression_algorithm received_compression =
       inspector.GetCallCompressionAlgorithm();
-  if (request->request_compressed_response() &&
-      received_compression == GRPC_COMPRESS_NONE) {
-    if (request->request_compressed_response() &&
-        received_compression == GRPC_COMPRESS_NONE) {
+  if (request->response_compressed().value()) {
+    if (received_compression == GRPC_COMPRESS_NONE) {
       // Requested some compression, got NONE. This is an error.
       gpr_log(GPR_ERROR,
               "Failure: Requested compression but got uncompressed response "
               "from server.");
       abort();
     }
-  }
-  if (!request->request_compressed_response()) {
-    GPR_ASSERT(!(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS));
-  } else if (request->response_type() == PayloadType::COMPRESSABLE) {
-    // requested compression and compressable response => results should always
-    // be compressed.
     GPR_ASSERT(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS);
+  } else {
+    // Didn't request compression -> make sure the response is uncompressed
+    GPR_ASSERT(!(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS));
   }
 }
 }  // namespace
@@ -110,6 +90,14 @@ TestService::Stub* InteropClient::ServiceStub::Get() {
   }
 
   return stub_.get();
+}
+
+UnimplementedService::Stub*
+InteropClient::ServiceStub::GetUnimplementedServiceStub() {
+  if (unimplemented_service_stub_ == nullptr) {
+    unimplemented_service_stub_ = UnimplementedService::NewStub(channel_);
+  }
+  return unimplemented_service_stub_.get();
 }
 
 void InteropClient::ServiceStub::Reset(std::shared_ptr<Channel> channel) {
@@ -167,8 +155,8 @@ bool InteropClient::AssertStatusCode(const Status& s,
 bool InteropClient::DoEmpty() {
   gpr_log(GPR_DEBUG, "Sending an empty rpc...");
 
-  Empty request = Empty::default_instance();
-  Empty response = Empty::default_instance();
+  Empty request;
+  Empty response;
   ClientContext context;
 
   Status s = serviceStub_.Get()->EmptyCall(&context, request, &response);
@@ -191,11 +179,16 @@ bool InteropClient::PerformLargeUnary(SimpleRequest* request,
                                       CheckerFn custom_checks_fn) {
   ClientContext context;
   InteropClientContextInspector inspector(context);
-  // If the request doesn't already specify the response type, default to
-  // COMPRESSABLE.
   request->set_response_size(kLargeResponseSize);
   grpc::string payload(kLargeRequestSize, '\0');
   request->mutable_payload()->set_body(payload.c_str(), kLargeRequestSize);
+  if (request->has_expect_compressed()) {
+    if (request->expect_compressed().value()) {
+      context.set_compression_algorithm(GRPC_COMPRESS_GZIP);
+    } else {
+      context.set_compression_algorithm(GRPC_COMPRESS_NONE);
+    }
+  }
 
   Status s = serviceStub_.Get()->UnaryCall(&context, *request, response);
   if (!AssertStatusOk(s)) {
@@ -205,27 +198,8 @@ bool InteropClient::PerformLargeUnary(SimpleRequest* request,
   custom_checks_fn(inspector, request, response);
 
   // Payload related checks.
-  GPR_ASSERT(response->payload().type() == request->response_type());
-  switch (response->payload().type()) {
-    case PayloadType::COMPRESSABLE:
-      GPR_ASSERT(response->payload().body() ==
-                 grpc::string(kLargeResponseSize, '\0'));
-      break;
-    case PayloadType::UNCOMPRESSABLE: {
-      // We don't really check anything: We can't assert that the payload is
-      // uncompressed because it's the server's prerogative to decide on that,
-      // and different implementations decide differently (ie, Java always
-      // compresses when requested to do so, whereas C core throws away the
-      // compressed payload if the output is larger than the input).
-      // In addition, we don't compare the actual random bytes received because
-      // asserting that data is sent/received properly isn't the purpose of this
-      // test. Moreover, different implementations are also free to use
-      // different sets of random bytes.
-    } break;
-    default:
-      GPR_ASSERT(false);
-  }
-
+  GPR_ASSERT(response->payload().body() ==
+             grpc::string(kLargeResponseSize, '\0'));
   return true;
 }
 
@@ -238,7 +212,6 @@ bool InteropClient::DoComputeEngineCreds(
   SimpleResponse response;
   request.set_fill_username(true);
   request.set_fill_oauth_scope(true);
-  request.set_response_type(PayloadType::COMPRESSABLE);
 
   if (!PerformLargeUnary(&request, &response)) {
     return false;
@@ -312,7 +285,6 @@ bool InteropClient::DoJwtTokenCreds(const grpc::string& username) {
   SimpleRequest request;
   SimpleResponse response;
   request.set_fill_username(true);
-  request.set_response_type(PayloadType::COMPRESSABLE);
 
   if (!PerformLargeUnary(&request, &response)) {
     return false;
@@ -328,7 +300,6 @@ bool InteropClient::DoLargeUnary() {
   gpr_log(GPR_DEBUG, "Sending a large unary rpc...");
   SimpleRequest request;
   SimpleResponse response;
-  request.set_response_type(PayloadType::COMPRESSABLE);
   if (!PerformLargeUnary(&request, &response)) {
     return false;
   }
@@ -336,32 +307,73 @@ bool InteropClient::DoLargeUnary() {
   return true;
 }
 
-bool InteropClient::DoLargeCompressedUnary() {
-  const bool request_compression[] = {false, true};
-  const PayloadType payload_types[] = {COMPRESSABLE, UNCOMPRESSABLE};
-  for (size_t i = 0; i < GPR_ARRAY_SIZE(payload_types); i++) {
-    for (size_t j = 0; j < GPR_ARRAY_SIZE(request_compression); j++) {
-      char* log_suffix;
-      gpr_asprintf(&log_suffix, "(compression=%s; payload=%s)",
-                   request_compression[j] ? "true" : "false",
-                   PayloadType_Name(payload_types[i]).c_str());
+bool InteropClient::DoClientCompressedUnary() {
+  // Probing for compression-checks support.
+  ClientContext probe_context;
+  SimpleRequest probe_req;
+  SimpleResponse probe_res;
 
-      gpr_log(GPR_DEBUG, "Sending a large compressed unary rpc %s.",
-              log_suffix);
-      SimpleRequest request;
-      SimpleResponse response;
-      request.set_response_type(payload_types[i]);
-      request.set_request_compressed_response(request_compression[j]);
+  probe_context.set_compression_algorithm(GRPC_COMPRESS_NONE);
+  probe_req.mutable_expect_compressed()->set_value(true);  // lies!
 
-      if (!PerformLargeUnary(&request, &response, CompressionChecks)) {
-        gpr_log(GPR_ERROR, "Large compressed unary failed %s", log_suffix);
-        gpr_free(log_suffix);
-        return false;
-      }
+  probe_req.set_response_size(kLargeResponseSize);
+  probe_req.mutable_payload()->set_body(grpc::string(kLargeRequestSize, '\0'));
 
-      gpr_log(GPR_DEBUG, "Large compressed unary done %s.", log_suffix);
+  gpr_log(GPR_DEBUG, "Sending probe for compressed unary request.");
+  const Status s =
+      serviceStub_.Get()->UnaryCall(&probe_context, probe_req, &probe_res);
+  if (s.error_code() != grpc::StatusCode::INVALID_ARGUMENT) {
+    // The server isn't able to evaluate incoming compression, making the rest
+    // of this test moot.
+    gpr_log(GPR_DEBUG, "Compressed unary request probe failed");
+    return false;
+  }
+  gpr_log(GPR_DEBUG, "Compressed unary request probe succeeded. Proceeding.");
+
+  const std::vector<bool> compressions = {true, false};
+  for (size_t i = 0; i < compressions.size(); i++) {
+    char* log_suffix;
+    gpr_asprintf(&log_suffix, "(compression=%s)",
+                 compressions[i] ? "true" : "false");
+
+    gpr_log(GPR_DEBUG, "Sending compressed unary request %s.", log_suffix);
+    SimpleRequest request;
+    SimpleResponse response;
+    request.mutable_expect_compressed()->set_value(compressions[i]);
+    if (!PerformLargeUnary(&request, &response, UnaryCompressionChecks)) {
+      gpr_log(GPR_ERROR, "Compressed unary request failed %s", log_suffix);
       gpr_free(log_suffix);
+      return false;
     }
+
+    gpr_log(GPR_DEBUG, "Compressed unary request failed %s", log_suffix);
+    gpr_free(log_suffix);
+  }
+
+  return true;
+}
+
+bool InteropClient::DoServerCompressedUnary() {
+  const std::vector<bool> compressions = {true, false};
+  for (size_t i = 0; i < compressions.size(); i++) {
+    char* log_suffix;
+    gpr_asprintf(&log_suffix, "(compression=%s)",
+                 compressions[i] ? "true" : "false");
+
+    gpr_log(GPR_DEBUG, "Sending unary request for compressed response %s.",
+            log_suffix);
+    SimpleRequest request;
+    SimpleResponse response;
+    request.mutable_response_compressed()->set_value(compressions[i]);
+
+    if (!PerformLargeUnary(&request, &response, UnaryCompressionChecks)) {
+      gpr_log(GPR_ERROR, "Request for compressed unary failed %s", log_suffix);
+      gpr_free(log_suffix);
+      return false;
+    }
+
+    gpr_log(GPR_DEBUG, "Request for compressed unary failed %s", log_suffix);
+    gpr_free(log_suffix);
   }
 
   return true;
@@ -388,7 +400,7 @@ bool InteropClient::DoRequestStreaming() {
       serviceStub_.Get()->StreamingInputCall(&context, &response));
 
   int aggregated_payload_size = 0;
-  for (unsigned int i = 0; i < request_stream_sizes.size(); ++i) {
+  for (size_t i = 0; i < request_stream_sizes.size(); ++i) {
     Payload* payload = request.mutable_payload();
     payload->set_body(grpc::string(request_stream_sizes[i], '\0'));
     if (!stream->Write(request)) {
@@ -397,7 +409,7 @@ bool InteropClient::DoRequestStreaming() {
     }
     aggregated_payload_size += request_stream_sizes[i];
   }
-  stream->WritesDone();
+  GPR_ASSERT(stream->WritesDone());
 
   Status s = stream->Finish();
   if (!AssertStatusOk(s)) {
@@ -433,7 +445,7 @@ bool InteropClient::DoResponseStreaming() {
     // most likely due to connection failure.
     gpr_log(GPR_ERROR,
             "DoResponseStreaming(): Read fewer streams (%d) than "
-            "response_stream_sizes.size() (%d)",
+            "response_stream_sizes.size() (%" PRIuPTR ")",
             i, response_stream_sizes.size());
     return TransientFailureOrAbort();
   }
@@ -447,90 +459,128 @@ bool InteropClient::DoResponseStreaming() {
   return true;
 }
 
-bool InteropClient::DoResponseCompressedStreaming() {
-  const bool request_compression[] = {false, true};
-  const PayloadType payload_types[] = {COMPRESSABLE, UNCOMPRESSABLE};
-  for (size_t i = 0; i < GPR_ARRAY_SIZE(payload_types); i++) {
-    for (size_t j = 0; j < GPR_ARRAY_SIZE(request_compression); j++) {
-      ClientContext context;
-      InteropClientContextInspector inspector(context);
-      StreamingOutputCallRequest request;
+bool InteropClient::DoClientCompressedStreaming() {
+  // Probing for compression-checks support.
+  ClientContext probe_context;
+  StreamingInputCallRequest probe_req;
+  StreamingInputCallResponse probe_res;
 
-      char* log_suffix;
-      gpr_asprintf(&log_suffix, "(compression=%s; payload=%s)",
-                   request_compression[j] ? "true" : "false",
-                   PayloadType_Name(payload_types[i]).c_str());
+  probe_context.set_compression_algorithm(GRPC_COMPRESS_NONE);
+  probe_req.mutable_expect_compressed()->set_value(true);  // lies!
+  probe_req.mutable_payload()->set_body(grpc::string(27182, '\0'));
 
-      gpr_log(GPR_DEBUG, "Receiving response streaming rpc %s.", log_suffix);
+  gpr_log(GPR_DEBUG, "Sending probe for compressed streaming request.");
 
-      request.set_response_type(payload_types[i]);
-      request.set_request_compressed_response(request_compression[j]);
+  std::unique_ptr<ClientWriter<StreamingInputCallRequest>> probe_stream(
+      serviceStub_.Get()->StreamingInputCall(&probe_context, &probe_res));
 
-      for (size_t k = 0; k < response_stream_sizes.size(); ++k) {
-        ResponseParameters* response_parameter =
-            request.add_response_parameters();
-        response_parameter->set_size(response_stream_sizes[k]);
-      }
-      StreamingOutputCallResponse response;
+  if (!probe_stream->Write(probe_req)) {
+    gpr_log(GPR_ERROR, "%s(): stream->Write() failed", __func__);
+    return TransientFailureOrAbort();
+  }
+  Status s = probe_stream->Finish();
+  if (s.error_code() != grpc::StatusCode::INVALID_ARGUMENT) {
+    // The server isn't able to evaluate incoming compression, making the rest
+    // of this test moot.
+    gpr_log(GPR_DEBUG, "Compressed streaming request probe failed");
+    return false;
+  }
+  gpr_log(GPR_DEBUG,
+          "Compressed streaming request probe succeeded. Proceeding.");
 
-      std::unique_ptr<ClientReader<StreamingOutputCallResponse>> stream(
-          serviceStub_.Get()->StreamingOutputCall(&context, request));
+  ClientContext context;
+  StreamingInputCallRequest request;
+  StreamingInputCallResponse response;
 
-      size_t k = 0;
-      while (stream->Read(&response)) {
-        // Payload related checks.
-        GPR_ASSERT(response.payload().type() == request.response_type());
-        switch (response.payload().type()) {
-          case PayloadType::COMPRESSABLE:
-            GPR_ASSERT(response.payload().body() ==
-                       grpc::string(response_stream_sizes[k], '\0'));
-            break;
-          case PayloadType::UNCOMPRESSABLE:
-            break;
-          default:
-            GPR_ASSERT(false);
-        }
+  context.set_compression_algorithm(GRPC_COMPRESS_GZIP);
+  std::unique_ptr<ClientWriter<StreamingInputCallRequest>> stream(
+      serviceStub_.Get()->StreamingInputCall(&context, &response));
 
-        // Compression related checks.
-        if (request.request_compressed_response()) {
-          GPR_ASSERT(inspector.GetCallCompressionAlgorithm() >
-                     GRPC_COMPRESS_NONE);
-          if (request.response_type() == PayloadType::COMPRESSABLE) {
-            // requested compression and compressable response => results should
-            // always be compressed.
-            GPR_ASSERT(inspector.GetMessageFlags() &
-                       GRPC_WRITE_INTERNAL_COMPRESS);
-          }
-        } else {
-          // requested *no* compression.
-          GPR_ASSERT(
-              !(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS));
-        }
-
-        ++k;
-      }
-
-      gpr_log(GPR_DEBUG, "Response streaming done %s.", log_suffix);
-      gpr_free(log_suffix);
-
-      if (k < response_stream_sizes.size()) {
-        // stream->Read() failed before reading all the expected messages. This
-        // is most likely due to a connection failure.
-        gpr_log(GPR_ERROR,
-                "DoResponseCompressedStreaming(): Responses read (k=%d) is "
-                "less than the expected messages (i.e "
-                "response_stream_sizes.size() (%d)). (i=%d, j=%d)",
-                k, response_stream_sizes.size(), i, j);
-        return TransientFailureOrAbort();
-      }
-
-      Status s = stream->Finish();
-      if (!AssertStatusOk(s)) {
-        return false;
-      }
-    }
+  request.mutable_payload()->set_body(grpc::string(27182, '\0'));
+  request.mutable_expect_compressed()->set_value(true);
+  gpr_log(GPR_DEBUG, "Sending streaming request with compression enabled");
+  if (!stream->Write(request)) {
+    gpr_log(GPR_ERROR, "%s(): stream->Write() failed", __func__);
+    return TransientFailureOrAbort();
   }
 
+  WriteOptions wopts;
+  wopts.set_no_compression();
+  request.mutable_payload()->set_body(grpc::string(45904, '\0'));
+  request.mutable_expect_compressed()->set_value(false);
+  gpr_log(GPR_DEBUG, "Sending streaming request with compression disabled");
+  if (!stream->Write(request, wopts)) {
+    gpr_log(GPR_ERROR, "%s(): stream->Write() failed", __func__);
+    return TransientFailureOrAbort();
+  }
+  GPR_ASSERT(stream->WritesDone());
+
+  s = stream->Finish();
+  if (!AssertStatusOk(s)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool InteropClient::DoServerCompressedStreaming() {
+  const std::vector<bool> compressions = {true, false};
+  const std::vector<int> sizes = {31415, 92653};
+
+  ClientContext context;
+  InteropClientContextInspector inspector(context);
+  StreamingOutputCallRequest request;
+
+  GPR_ASSERT(compressions.size() == sizes.size());
+  for (size_t i = 0; i < sizes.size(); i++) {
+    char* log_suffix;
+    gpr_asprintf(&log_suffix, "(compression=%s; size=%d)",
+                 compressions[i] ? "true" : "false", sizes[i]);
+
+    gpr_log(GPR_DEBUG, "Sending request streaming rpc %s.", log_suffix);
+    gpr_free(log_suffix);
+
+    ResponseParameters* const response_parameter =
+        request.add_response_parameters();
+    response_parameter->mutable_compressed()->set_value(compressions[i]);
+    response_parameter->set_size(sizes[i]);
+  }
+  std::unique_ptr<ClientReader<StreamingOutputCallResponse>> stream(
+      serviceStub_.Get()->StreamingOutputCall(&context, request));
+
+  size_t k = 0;
+  StreamingOutputCallResponse response;
+  while (stream->Read(&response)) {
+    // Payload size checks.
+    GPR_ASSERT(response.payload().body() ==
+               grpc::string(request.response_parameters(k).size(), '\0'));
+
+    // Compression checks.
+    GPR_ASSERT(request.response_parameters(k).has_compressed());
+    if (request.response_parameters(k).compressed().value()) {
+      GPR_ASSERT(inspector.GetCallCompressionAlgorithm() > GRPC_COMPRESS_NONE);
+      GPR_ASSERT(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS);
+    } else {
+      // requested *no* compression.
+      GPR_ASSERT(!(inspector.GetMessageFlags() & GRPC_WRITE_INTERNAL_COMPRESS));
+    }
+    ++k;
+  }
+
+  if (k < sizes.size()) {
+    // stream->Read() failed before reading all the expected messages. This
+    // is most likely due to a connection failure.
+    gpr_log(GPR_ERROR,
+            "%s(): Responses read (k=%" PRIuPTR
+            ") is less than the expected number of  messages (%" PRIuPTR ").",
+            __func__, k, sizes.size());
+    return TransientFailureOrAbort();
+  }
+
+  Status s = stream->Finish();
+  if (!AssertStatusOk(s)) {
+    return false;
+  }
   return true;
 }
 
@@ -553,7 +603,9 @@ bool InteropClient::DoResponseStreamingWithSlowConsumer() {
     GPR_ASSERT(response.payload().body() ==
                grpc::string(kResponseMessageSize, '\0'));
     gpr_log(GPR_DEBUG, "received message %d", i);
-    usleep(kReceiveDelayMilliSeconds * 1000);
+    gpr_sleep_until(gpr_time_add(
+        gpr_now(GPR_CLOCK_REALTIME),
+        gpr_time_from_millis(kReceiveDelayMilliSeconds, GPR_TIMESPAN)));
     ++i;
   }
 
@@ -608,7 +660,7 @@ bool InteropClient::DoHalfDuplex() {
     // most likely due to a connection failure
     gpr_log(GPR_ERROR,
             "DoHalfDuplex(): Responses read (i=%d) are less than the expected "
-            "number of messages response_stream_sizes.size() (%d)",
+            "number of messages response_stream_sizes.size() (%" PRIuPTR ")",
             i, response_stream_sizes.size());
     return TransientFailureOrAbort();
   }
@@ -631,7 +683,6 @@ bool InteropClient::DoPingPong() {
       stream(serviceStub_.Get()->FullDuplexCall(&context));
 
   StreamingOutputCallRequest request;
-  request.set_response_type(PayloadType::COMPRESSABLE);
   ResponseParameters* response_parameter = request.add_response_parameters();
   Payload* payload = request.mutable_payload();
   StreamingOutputCallResponse response;
@@ -698,7 +749,6 @@ bool InteropClient::DoCancelAfterFirstResponse() {
       stream(serviceStub_.Get()->FullDuplexCall(&context));
 
   StreamingOutputCallRequest request;
-  request.set_response_type(PayloadType::COMPRESSABLE);
   ResponseParameters* response_parameter = request.add_response_parameters();
   response_parameter->set_size(31415);
   request.mutable_payload()->set_body(grpc::string(27182, '\0'));
@@ -772,22 +822,107 @@ bool InteropClient::DoStatusWithMessage() {
   gpr_log(GPR_DEBUG,
           "Sending RPC with a request for status code 2 and message");
 
+  const grpc::StatusCode test_code = grpc::StatusCode::UNKNOWN;
+  const grpc::string test_msg = "This is a test message";
+
+  // Test UnaryCall.
   ClientContext context;
   SimpleRequest request;
   SimpleResponse response;
   EchoStatus* requested_status = request.mutable_response_status();
-  requested_status->set_code(grpc::StatusCode::UNKNOWN);
-  grpc::string test_msg = "This is a test message";
+  requested_status->set_code(test_code);
   requested_status->set_message(test_msg);
-
   Status s = serviceStub_.Get()->UnaryCall(&context, request, &response);
-
   if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN)) {
     return false;
   }
-
   GPR_ASSERT(s.error_message() == test_msg);
+
+  // Test FullDuplexCall.
+  ClientContext stream_context;
+  std::shared_ptr<ClientReaderWriter<StreamingOutputCallRequest,
+                                     StreamingOutputCallResponse>>
+      stream(serviceStub_.Get()->FullDuplexCall(&stream_context));
+  StreamingOutputCallRequest streaming_request;
+  requested_status = streaming_request.mutable_response_status();
+  requested_status->set_code(test_code);
+  requested_status->set_message(test_msg);
+  stream->Write(streaming_request);
+  stream->WritesDone();
+  StreamingOutputCallResponse streaming_response;
+  while (stream->Read(&streaming_response))
+    ;
+  s = stream->Finish();
+  if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN)) {
+    return false;
+  }
+  GPR_ASSERT(s.error_message() == test_msg);
+
   gpr_log(GPR_DEBUG, "Done testing Status and Message");
+  return true;
+}
+
+bool InteropClient::DoCacheableUnary() {
+  gpr_log(GPR_DEBUG, "Sending RPC with cacheable response");
+
+  // Create request with current timestamp
+  gpr_timespec ts = gpr_now(GPR_CLOCK_PRECISE);
+  std::string timestamp = std::to_string((long long unsigned)ts.tv_nsec);
+  SimpleRequest request;
+  request.mutable_payload()->set_body(timestamp.c_str(), timestamp.size());
+
+  // Request 1
+  ClientContext context1;
+  SimpleResponse response1;
+  context1.set_cacheable(true);
+  // Add fake user IP since some proxy's (GFE) won't cache requests from
+  // localhost.
+  context1.AddMetadata("x-user-ip", "1.2.3.4");
+  Status s1 =
+      serviceStub_.Get()->CacheableUnaryCall(&context1, request, &response1);
+  if (!AssertStatusOk(s1)) {
+    return false;
+  }
+  gpr_log(GPR_DEBUG, "response 1 payload: %s",
+          response1.payload().body().c_str());
+
+  // Request 2
+  ClientContext context2;
+  SimpleResponse response2;
+  context2.set_cacheable(true);
+  context2.AddMetadata("x-user-ip", "1.2.3.4");
+  Status s2 =
+      serviceStub_.Get()->CacheableUnaryCall(&context2, request, &response2);
+  if (!AssertStatusOk(s2)) {
+    return false;
+  }
+  gpr_log(GPR_DEBUG, "response 2 payload: %s",
+          response2.payload().body().c_str());
+
+  // Check that the body is same for both requests. It will be the same if the
+  // second response is a cached copy of the first response
+  GPR_ASSERT(response2.payload().body() == response1.payload().body());
+
+  // Request 3
+  // Modify the request body so it will not get a cache hit
+  ts = gpr_now(GPR_CLOCK_PRECISE);
+  timestamp = std::to_string((long long unsigned)ts.tv_nsec);
+  SimpleRequest request1;
+  request1.mutable_payload()->set_body(timestamp.c_str(), timestamp.size());
+  ClientContext context3;
+  SimpleResponse response3;
+  context3.set_cacheable(true);
+  context3.AddMetadata("x-user-ip", "1.2.3.4");
+  Status s3 =
+      serviceStub_.Get()->CacheableUnaryCall(&context3, request1, &response3);
+  if (!AssertStatusOk(s3)) {
+    return false;
+  }
+  gpr_log(GPR_DEBUG, "response 3 payload: %s",
+          response3.payload().body().c_str());
+
+  // Check that the response is different from the previous response.
+  GPR_ASSERT(response3.payload().body() != response1.payload().body());
   return true;
 }
 
@@ -818,7 +953,7 @@ bool InteropClient::DoCustomMetadata() {
     const auto& server_initial_metadata = context.GetServerInitialMetadata();
     auto iter = server_initial_metadata.find(kEchoInitialMetadataKey);
     GPR_ASSERT(iter != server_initial_metadata.end());
-    GPR_ASSERT(iter->second.data() == kInitialMetadataValue);
+    GPR_ASSERT(iter->second == kInitialMetadataValue);
     const auto& server_trailing_metadata = context.GetServerTrailingMetadata();
     iter = server_trailing_metadata.find(kEchoTrailingBinMetadataKey);
     GPR_ASSERT(iter != server_trailing_metadata.end());
@@ -838,7 +973,6 @@ bool InteropClient::DoCustomMetadata() {
         stream(serviceStub_.Get()->FullDuplexCall(&context));
 
     StreamingOutputCallRequest request;
-    request.set_response_type(PayloadType::COMPRESSABLE);
     ResponseParameters* response_parameter = request.add_response_parameters();
     response_parameter->set_size(kLargeResponseSize);
     grpc::string payload(kLargeRequestSize, '\0');
@@ -870,7 +1004,7 @@ bool InteropClient::DoCustomMetadata() {
     const auto& server_initial_metadata = context.GetServerInitialMetadata();
     auto iter = server_initial_metadata.find(kEchoInitialMetadataKey);
     GPR_ASSERT(iter != server_initial_metadata.end());
-    GPR_ASSERT(iter->second.data() == kInitialMetadataValue);
+    GPR_ASSERT(iter->second == kInitialMetadataValue);
     const auto& server_trailing_metadata = context.GetServerTrailingMetadata();
     iter = server_trailing_metadata.find(kEchoTrailingBinMetadataKey);
     GPR_ASSERT(iter != server_trailing_metadata.end());
@@ -880,6 +1014,43 @@ bool InteropClient::DoCustomMetadata() {
     gpr_log(GPR_DEBUG, "Done testing stream with custom metadata");
   }
 
+  return true;
+}
+
+bool InteropClient::DoUnimplementedService() {
+  gpr_log(GPR_DEBUG, "Sending a request for an unimplemented service...");
+
+  Empty request;
+  Empty response;
+  ClientContext context;
+
+  UnimplementedService::Stub* stub = serviceStub_.GetUnimplementedServiceStub();
+
+  Status s = stub->UnimplementedCall(&context, request, &response);
+
+  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED)) {
+    return false;
+  }
+
+  gpr_log(GPR_DEBUG, "unimplemented service done.");
+  return true;
+}
+
+bool InteropClient::DoUnimplementedMethod() {
+  gpr_log(GPR_DEBUG, "Sending a request for an unimplemented rpc...");
+
+  Empty request;
+  Empty response;
+  ClientContext context;
+
+  Status s =
+      serviceStub_.Get()->UnimplementedCall(&context, request, &response);
+
+  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED)) {
+    return false;
+  }
+
+  gpr_log(GPR_DEBUG, "unimplemented rpc done.");
   return true;
 }
 

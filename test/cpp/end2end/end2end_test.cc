@@ -1,33 +1,18 @@
 /*
  *
- * Copyright 2015, Google Inc.
- * All rights reserved.
+ * Copyright 2015 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -37,6 +22,7 @@
 #include <grpc++/channel.h>
 #include <grpc++/client_context.h>
 #include <grpc++/create_channel.h>
+#include <grpc++/resource_quota.h>
 #include <grpc++/security/auth_metadata_processor.h>
 #include <grpc++/security/credentials.h>
 #include <grpc++/security/server_credentials.h>
@@ -44,11 +30,13 @@
 #include <grpc++/server_builder.h>
 #include <grpc++/server_context.h>
 #include <grpc/grpc.h>
+#include <grpc/support/alloc.h>
+#include <grpc/support/log.h>
 #include <grpc/support/thd.h>
 #include <grpc/support/time.h>
-#include <gtest/gtest.h>
 
 #include "src/core/lib/security/credentials/credentials.h"
+#include "src/core/lib/support/env.h"
 #include "src/proto/grpc/testing/duplicate/echo_duplicate.grpc.pb.h"
 #include "src/proto/grpc/testing/echo.grpc.pb.h"
 #include "test/core/util/port.h"
@@ -56,6 +44,8 @@
 #include "test/cpp/end2end/test_service_impl.h"
 #include "test/cpp/util/string_ref_helper.h"
 #include "test/cpp/util/test_credentials_provider.h"
+
+#include <gtest/gtest.h>
 
 using grpc::testing::EchoRequest;
 using grpc::testing::EchoResponse;
@@ -75,41 +65,50 @@ bool CheckIsLocalhost(const grpc::string& addr) {
          addr.substr(0, kIpv6.size()) == kIpv6;
 }
 
+const char kTestCredsPluginErrorMsg[] = "Could not find plugin metadata.";
+
 class TestMetadataCredentialsPlugin : public MetadataCredentialsPlugin {
  public:
-  static const char kMetadataKey[];
+  static const char kGoodMetadataKey[];
+  static const char kBadMetadataKey[];
 
-  TestMetadataCredentialsPlugin(grpc::string_ref metadata_value,
+  TestMetadataCredentialsPlugin(grpc::string_ref metadata_key,
+                                grpc::string_ref metadata_value,
                                 bool is_blocking, bool is_successful)
-      : metadata_value_(metadata_value.data(), metadata_value.length()),
+      : metadata_key_(metadata_key.data(), metadata_key.length()),
+        metadata_value_(metadata_value.data(), metadata_value.length()),
         is_blocking_(is_blocking),
         is_successful_(is_successful) {}
 
-  bool IsBlocking() const GRPC_OVERRIDE { return is_blocking_; }
+  bool IsBlocking() const override { return is_blocking_; }
 
-  Status GetMetadata(grpc::string_ref service_url, grpc::string_ref method_name,
-                     const grpc::AuthContext& channel_auth_context,
-                     std::multimap<grpc::string, grpc::string>* metadata)
-      GRPC_OVERRIDE {
+  Status GetMetadata(
+      grpc::string_ref service_url, grpc::string_ref method_name,
+      const grpc::AuthContext& channel_auth_context,
+      std::multimap<grpc::string, grpc::string>* metadata) override {
     EXPECT_GT(service_url.length(), 0UL);
     EXPECT_GT(method_name.length(), 0UL);
     EXPECT_TRUE(channel_auth_context.IsPeerAuthenticated());
     EXPECT_TRUE(metadata != nullptr);
     if (is_successful_) {
-      metadata->insert(std::make_pair(kMetadataKey, metadata_value_));
+      metadata->insert(std::make_pair(metadata_key_, metadata_value_));
       return Status::OK;
     } else {
-      return Status(StatusCode::NOT_FOUND, "Could not find plugin metadata.");
+      return Status(StatusCode::NOT_FOUND, kTestCredsPluginErrorMsg);
     }
   }
 
  private:
+  grpc::string metadata_key_;
   grpc::string metadata_value_;
   bool is_blocking_;
   bool is_successful_;
 };
 
-const char TestMetadataCredentialsPlugin::kMetadataKey[] = "TestPluginMetadata";
+const char TestMetadataCredentialsPlugin::kBadMetadataKey[] =
+    "TestPluginMetadata";
+const char TestMetadataCredentialsPlugin::kGoodMetadataKey[] =
+    "test-plugin-metadata";
 
 class TestAuthMetadataProcessor : public AuthMetadataProcessor {
  public:
@@ -120,26 +119,30 @@ class TestAuthMetadataProcessor : public AuthMetadataProcessor {
   std::shared_ptr<CallCredentials> GetCompatibleClientCreds() {
     return MetadataCredentialsFromPlugin(
         std::unique_ptr<MetadataCredentialsPlugin>(
-            new TestMetadataCredentialsPlugin(kGoodGuy, is_blocking_, true)));
+            new TestMetadataCredentialsPlugin(
+                TestMetadataCredentialsPlugin::kGoodMetadataKey, kGoodGuy,
+                is_blocking_, true)));
   }
 
   std::shared_ptr<CallCredentials> GetIncompatibleClientCreds() {
     return MetadataCredentialsFromPlugin(
         std::unique_ptr<MetadataCredentialsPlugin>(
-            new TestMetadataCredentialsPlugin("Mr Hyde", is_blocking_, true)));
+            new TestMetadataCredentialsPlugin(
+                TestMetadataCredentialsPlugin::kGoodMetadataKey, "Mr Hyde",
+                is_blocking_, true)));
   }
 
   // Interface implementation
-  bool IsBlocking() const GRPC_OVERRIDE { return is_blocking_; }
+  bool IsBlocking() const override { return is_blocking_; }
 
   Status Process(const InputMetadata& auth_metadata, AuthContext* context,
                  OutputMetadata* consumed_auth_metadata,
-                 OutputMetadata* response_metadata) GRPC_OVERRIDE {
+                 OutputMetadata* response_metadata) override {
     EXPECT_TRUE(consumed_auth_metadata != nullptr);
     EXPECT_TRUE(context != nullptr);
     EXPECT_TRUE(response_metadata != nullptr);
     auto auth_md =
-        auth_metadata.find(TestMetadataCredentialsPlugin::kMetadataKey);
+        auth_metadata.find(TestMetadataCredentialsPlugin::kGoodMetadataKey);
     EXPECT_NE(auth_md, auth_metadata.end());
     string_ref auth_md_value = auth_md->second;
     if (auth_md_value == kGoodGuy) {
@@ -170,7 +173,7 @@ class Proxy : public ::grpc::testing::EchoTestService::Service {
       : stub_(grpc::testing::EchoTestService::NewStub(channel)) {}
 
   Status Echo(ServerContext* server_context, const EchoRequest* request,
-              EchoResponse* response) GRPC_OVERRIDE {
+              EchoResponse* response) override {
     std::unique_ptr<ClientContext> client_context =
         ClientContext::FromServerContext(*server_context);
     return stub_->Echo(client_context.get(), *request, response);
@@ -184,7 +187,7 @@ class TestServiceImplDupPkg
     : public ::grpc::testing::duplicate::EchoTestService::Service {
  public:
   Status Echo(ServerContext* context, const EchoRequest* request,
-              EchoResponse* response) GRPC_OVERRIDE {
+              EchoResponse* response) override {
     response->set_message("no package");
     return Status::OK;
   }
@@ -192,49 +195,88 @@ class TestServiceImplDupPkg
 
 class TestScenario {
  public:
-  TestScenario(bool proxy, const grpc::string& creds_type)
-      : use_proxy(proxy), credentials_type(creds_type) {}
-  void Log() const {
-    gpr_log(GPR_INFO, "Scenario: proxy %d, credentials %s", use_proxy,
-            credentials_type.c_str());
-  }
+  TestScenario(bool proxy, bool inproc_stub, const grpc::string& creds_type)
+      : use_proxy(proxy), inproc(inproc_stub), credentials_type(creds_type) {}
+  void Log() const;
   bool use_proxy;
+  bool inproc;
   const grpc::string credentials_type;
 };
+
+static std::ostream& operator<<(std::ostream& out,
+                                const TestScenario& scenario) {
+  return out << "TestScenario{use_proxy="
+             << (scenario.use_proxy ? "true" : "false")
+             << ", inproc=" << (scenario.inproc ? "true" : "false")
+             << ", credentials='" << scenario.credentials_type << "'}";
+}
+
+void TestScenario::Log() const {
+  std::ostringstream out;
+  out << *this;
+  gpr_log(GPR_DEBUG, "%s", out.str().c_str());
+}
 
 class End2endTest : public ::testing::TestWithParam<TestScenario> {
  protected:
   End2endTest()
       : is_server_started_(false),
         kMaxMessageSize_(8192),
-        special_service_("special") {
+        special_service_("special"),
+        first_picked_port_(0) {
     GetParam().Log();
   }
 
-  void TearDown() GRPC_OVERRIDE {
+  void TearDown() override {
     if (is_server_started_) {
       server_->Shutdown();
       if (proxy_server_) proxy_server_->Shutdown();
+    }
+    if (first_picked_port_ > 0) {
+      grpc_recycle_unused_port(first_picked_port_);
     }
   }
 
   void StartServer(const std::shared_ptr<AuthMetadataProcessor>& processor) {
     int port = grpc_pick_unused_port_or_die();
+    first_picked_port_ = port;
     server_address_ << "127.0.0.1:" << port;
     // Setup server
+    BuildAndStartServer(processor);
+  }
+
+  void RestartServer(const std::shared_ptr<AuthMetadataProcessor>& processor) {
+    if (is_server_started_) {
+      server_->Shutdown();
+      BuildAndStartServer(processor);
+    }
+  }
+
+  void BuildAndStartServer(
+      const std::shared_ptr<AuthMetadataProcessor>& processor) {
     ServerBuilder builder;
-    auto server_creds = GetServerCredentials(GetParam().credentials_type);
+    ConfigureServerBuilder(&builder);
+    auto server_creds = GetCredentialsProvider()->GetServerCredentials(
+        GetParam().credentials_type);
     if (GetParam().credentials_type != kInsecureCredentialsType) {
       server_creds->SetAuthMetadataProcessor(processor);
     }
     builder.AddListeningPort(server_address_.str(), server_creds);
     builder.RegisterService(&service_);
     builder.RegisterService("foo.test.youtube.com", &special_service_);
-    builder.SetMaxMessageSize(
-        kMaxMessageSize_);  // For testing max message size.
     builder.RegisterService(&dup_pkg_service_);
+
+    builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, 4);
+    builder.SetSyncServerOption(
+        ServerBuilder::SyncServerOption::CQ_TIMEOUT_MSEC, 10);
+
     server_ = builder.BuildAndStart();
     is_server_started_ = true;
+  }
+
+  virtual void ConfigureServerBuilder(ServerBuilder* builder) {
+    builder->SetMaxMessageSize(
+        kMaxMessageSize_);  // For testing max message size.
   }
 
   void ResetChannel() {
@@ -243,13 +285,19 @@ class End2endTest : public ::testing::TestWithParam<TestScenario> {
     }
     EXPECT_TRUE(is_server_started_);
     ChannelArguments args;
-    auto channel_creds =
-        GetChannelCredentials(GetParam().credentials_type, &args);
+    auto channel_creds = GetCredentialsProvider()->GetChannelCredentials(
+        GetParam().credentials_type, &args);
     if (!user_agent_prefix_.empty()) {
       args.SetUserAgentPrefix(user_agent_prefix_);
     }
     args.SetString(GRPC_ARG_SECONDARY_USER_AGENT_STRING, "end2end_test");
-    channel_ = CreateCustomChannel(server_address_.str(), channel_creds, args);
+
+    if (!GetParam().inproc) {
+      channel_ =
+          CreateCustomChannel(server_address_.str(), channel_creds, args);
+    } else {
+      channel_ = server_->InProcessChannel(args);
+    }
   }
 
   void ResetStub() {
@@ -262,6 +310,11 @@ class End2endTest : public ::testing::TestWithParam<TestScenario> {
       ServerBuilder builder;
       builder.AddListeningPort(proxyaddr.str(), InsecureServerCredentials());
       builder.RegisterService(proxy_service_.get());
+
+      builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, 4);
+      builder.SetSyncServerOption(
+          ServerBuilder::SyncServerOption::CQ_TIMEOUT_MSEC, 10);
+
       proxy_server_ = builder.BuildAndStart();
 
       channel_ = CreateChannel(proxyaddr.str(), InsecureChannelCredentials());
@@ -282,6 +335,7 @@ class End2endTest : public ::testing::TestWithParam<TestScenario> {
   TestServiceImpl special_service_;
   TestServiceImplDupPkg dup_pkg_service_;
   grpc::string user_agent_prefix_;
+  int first_picked_port_;
 };
 
 static void SendRpc(grpc::testing::EchoTestService::Stub* stub, int num_rpcs,
@@ -329,7 +383,7 @@ class End2endServerTryCancelTest : public End2endTest {
 
     // Send server_try_cancel value in the client metadata
     context.AddMetadata(kServerTryCancelRequest,
-                        std::to_string(server_try_cancel));
+                        grpc::to_string(server_try_cancel));
 
     auto stream = stub_->RequestStream(&context, &response);
 
@@ -402,18 +456,18 @@ class End2endServerTryCancelTest : public End2endTest {
 
     // Send server_try_cancel in the client metadata
     context.AddMetadata(kServerTryCancelRequest,
-                        std::to_string(server_try_cancel));
+                        grpc::to_string(server_try_cancel));
 
     request.set_message("hello");
     auto stream = stub_->ResponseStream(&context, request);
 
     int num_msgs_read = 0;
-    while (num_msgs_read < kNumResponseStreamsMsgs) {
+    while (num_msgs_read < kServerDefaultResponseStreamsToSend) {
       if (!stream->Read(&response)) {
         break;
       }
       EXPECT_EQ(response.message(),
-                request.message() + std::to_string(num_msgs_read));
+                request.message() + grpc::to_string(num_msgs_read));
       num_msgs_read++;
     }
     gpr_log(GPR_INFO, "Read %d messages", num_msgs_read);
@@ -434,14 +488,14 @@ class End2endServerTryCancelTest : public End2endTest {
       case CANCEL_DURING_PROCESSING:
         // Server cancelled while writing messages. Client must have read less
         // than or equal to the expected number of messages
-        EXPECT_LE(num_msgs_read, kNumResponseStreamsMsgs);
+        EXPECT_LE(num_msgs_read, kServerDefaultResponseStreamsToSend);
         break;
 
       case CANCEL_AFTER_PROCESSING:
         // Even though the Server cancelled after writing all messages, the RPC
         // may be cancelled before the Client got a chance to read all the
         // messages.
-        EXPECT_LE(num_msgs_read, kNumResponseStreamsMsgs);
+        EXPECT_LE(num_msgs_read, kServerDefaultResponseStreamsToSend);
         break;
 
       default: {
@@ -479,14 +533,14 @@ class End2endServerTryCancelTest : public End2endTest {
 
     // Send server_try_cancel in the client metadata
     context.AddMetadata(kServerTryCancelRequest,
-                        std::to_string(server_try_cancel));
+                        grpc::to_string(server_try_cancel));
 
     auto stream = stub_->BidiStream(&context);
 
     int num_msgs_read = 0;
     int num_msgs_sent = 0;
     while (num_msgs_sent < num_messages) {
-      request.set_message("hello " + std::to_string(num_msgs_sent));
+      request.set_message("hello " + grpc::to_string(num_msgs_sent));
       if (!stream->Write(request)) {
         break;
       }
@@ -548,7 +602,7 @@ TEST_P(End2endServerTryCancelTest, RequestEchoServerCancel) {
   ClientContext context;
 
   context.AddMetadata(kServerTryCancelRequest,
-                      std::to_string(CANCEL_BEFORE_PROCESSING));
+                      grpc::to_string(CANCEL_BEFORE_PROCESSING));
   Status s = stub_->Echo(&context, request, &response);
   EXPECT_FALSE(s.ok());
   EXPECT_EQ(grpc::StatusCode::CANCELLED, s.error_code());
@@ -603,7 +657,11 @@ TEST_P(End2endServerTryCancelTest, BidiStreamServerCancelAfter) {
   TestBidiStreamServerCancel(CANCEL_AFTER_PROCESSING, 5);
 }
 
-TEST_P(End2endTest, SimpleRpcWithCustomeUserAgentPrefix) {
+TEST_P(End2endTest, SimpleRpcWithCustomUserAgentPrefix) {
+  // User-Agent is an HTTP header for HTTP transports only
+  if (GetParam().inproc) {
+    return;
+  }
   user_agent_prefix_ = "custom_prefix";
   ResetStub();
   EchoRequest request;
@@ -619,31 +677,55 @@ TEST_P(End2endTest, SimpleRpcWithCustomeUserAgentPrefix) {
   auto iter = trailing_metadata.find("user-agent");
   EXPECT_TRUE(iter != trailing_metadata.end());
   grpc::string expected_prefix = user_agent_prefix_ + " grpc-c++/";
-  EXPECT_TRUE(iter->second.starts_with(expected_prefix));
+  EXPECT_TRUE(iter->second.starts_with(expected_prefix)) << iter->second;
 }
 
 TEST_P(End2endTest, MultipleRpcsWithVariedBinaryMetadataValue) {
   ResetStub();
-  std::vector<std::thread*> threads;
+  std::vector<std::thread> threads;
   for (int i = 0; i < 10; ++i) {
-    threads.push_back(new std::thread(SendRpc, stub_.get(), 10, true));
+    threads.emplace_back(SendRpc, stub_.get(), 10, true);
   }
   for (int i = 0; i < 10; ++i) {
-    threads[i]->join();
-    delete threads[i];
+    threads[i].join();
   }
 }
 
 TEST_P(End2endTest, MultipleRpcs) {
   ResetStub();
-  std::vector<std::thread*> threads;
+  std::vector<std::thread> threads;
   for (int i = 0; i < 10; ++i) {
-    threads.push_back(new std::thread(SendRpc, stub_.get(), 10, false));
+    threads.emplace_back(SendRpc, stub_.get(), 10, false);
   }
   for (int i = 0; i < 10; ++i) {
-    threads[i]->join();
-    delete threads[i];
+    threads[i].join();
   }
+}
+
+TEST_P(End2endTest, ReconnectChannel) {
+  if (GetParam().inproc) {
+    return;
+  }
+  gpr_setenv("GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS", "200");
+  int poller_slowdown_factor = 1;
+  // It needs 2 pollset_works to reconnect the channel with polling engine
+  // "poll"
+  char* s = gpr_getenv("GRPC_POLL_STRATEGY");
+  if (s != nullptr && 0 == strcmp(s, "poll")) {
+    poller_slowdown_factor = 2;
+  }
+  gpr_free(s);
+  ResetStub();
+  SendRpc(stub_.get(), 1, false);
+  RestartServer(std::shared_ptr<AuthMetadataProcessor>());
+  // It needs more than GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS time to
+  // reconnect the channel.
+  gpr_sleep_until(gpr_time_add(
+      gpr_now(GPR_CLOCK_REALTIME),
+      gpr_time_from_millis(
+          300 * poller_slowdown_factor * grpc_test_slowdown_factor(),
+          GPR_TIMESPAN)));
+  SendRpc(stub_.get(), 1, false);
 }
 
 TEST_P(End2endTest, RequestStreamOneRequest) {
@@ -656,6 +738,22 @@ TEST_P(End2endTest, RequestStreamOneRequest) {
   request.set_message("hello");
   EXPECT_TRUE(stream->Write(request));
   stream->WritesDone();
+  Status s = stream->Finish();
+  EXPECT_EQ(response.message(), request.message());
+  EXPECT_TRUE(s.ok());
+  EXPECT_TRUE(context.debug_error_string().empty());
+}
+
+TEST_P(End2endTest, RequestStreamOneRequestWithCoalescingApi) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+
+  context.set_initial_metadata_corked(true);
+  auto stream = stub_->RequestStream(&context, &response);
+  request.set_message("hello");
+  stream->WriteLast(request, WriteOptions());
   Status s = stream->Finish();
   EXPECT_EQ(response.message(), request.message());
   EXPECT_TRUE(s.ok());
@@ -677,6 +775,38 @@ TEST_P(End2endTest, RequestStreamTwoRequests) {
   EXPECT_TRUE(s.ok());
 }
 
+TEST_P(End2endTest, RequestStreamTwoRequestsWithWriteThrough) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+
+  auto stream = stub_->RequestStream(&context, &response);
+  request.set_message("hello");
+  EXPECT_TRUE(stream->Write(request, WriteOptions().set_write_through()));
+  EXPECT_TRUE(stream->Write(request, WriteOptions().set_write_through()));
+  stream->WritesDone();
+  Status s = stream->Finish();
+  EXPECT_EQ(response.message(), "hellohello");
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_P(End2endTest, RequestStreamTwoRequestsWithCoalescingApi) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+
+  context.set_initial_metadata_corked(true);
+  auto stream = stub_->RequestStream(&context, &response);
+  request.set_message("hello");
+  EXPECT_TRUE(stream->Write(request));
+  stream->WriteLast(request, WriteOptions());
+  Status s = stream->Finish();
+  EXPECT_EQ(response.message(), "hellohello");
+  EXPECT_TRUE(s.ok());
+}
+
 TEST_P(End2endTest, ResponseStream) {
   ResetStub();
   EchoRequest request;
@@ -685,12 +815,52 @@ TEST_P(End2endTest, ResponseStream) {
   request.set_message("hello");
 
   auto stream = stub_->ResponseStream(&context, request);
+  for (int i = 0; i < kServerDefaultResponseStreamsToSend; ++i) {
+    EXPECT_TRUE(stream->Read(&response));
+    EXPECT_EQ(response.message(), request.message() + grpc::to_string(i));
+  }
+  EXPECT_FALSE(stream->Read(&response));
+
+  Status s = stream->Finish();
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_P(End2endTest, ResponseStreamWithCoalescingApi) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  request.set_message("hello");
+  context.AddMetadata(kServerUseCoalescingApi, "1");
+
+  auto stream = stub_->ResponseStream(&context, request);
+  for (int i = 0; i < kServerDefaultResponseStreamsToSend; ++i) {
+    EXPECT_TRUE(stream->Read(&response));
+    EXPECT_EQ(response.message(), request.message() + grpc::to_string(i));
+  }
+  EXPECT_FALSE(stream->Read(&response));
+
+  Status s = stream->Finish();
+  EXPECT_TRUE(s.ok());
+}
+
+// This was added to prevent regression from issue:
+// https://github.com/grpc/grpc/issues/11546
+TEST_P(End2endTest, ResponseStreamWithEverythingCoalesced) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  request.set_message("hello");
+  context.AddMetadata(kServerUseCoalescingApi, "1");
+  // We will only send one message, forcing everything (init metadata, message,
+  // trailing) to be coalesced together.
+  context.AddMetadata(kServerResponseStreamsToSend, "1");
+
+  auto stream = stub_->ResponseStream(&context, request);
   EXPECT_TRUE(stream->Read(&response));
   EXPECT_EQ(response.message(), request.message() + "0");
-  EXPECT_TRUE(stream->Read(&response));
-  EXPECT_EQ(response.message(), request.message() + "1");
-  EXPECT_TRUE(stream->Read(&response));
-  EXPECT_EQ(response.message(), request.message() + "2");
+
   EXPECT_FALSE(stream->Read(&response));
 
   Status s = stream->Finish();
@@ -706,6 +876,32 @@ TEST_P(End2endTest, BidiStream) {
 
   auto stream = stub_->BidiStream(&context);
 
+  for (int i = 0; i < kServerDefaultResponseStreamsToSend; ++i) {
+    request.set_message(msg + grpc::to_string(i));
+    EXPECT_TRUE(stream->Write(request));
+    EXPECT_TRUE(stream->Read(&response));
+    EXPECT_EQ(response.message(), request.message());
+  }
+
+  stream->WritesDone();
+  EXPECT_FALSE(stream->Read(&response));
+  EXPECT_FALSE(stream->Read(&response));
+
+  Status s = stream->Finish();
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_P(End2endTest, BidiStreamWithCoalescingApi) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  context.AddMetadata(kServerFinishAfterNReads, "3");
+  context.set_initial_metadata_corked(true);
+  grpc::string msg("hello");
+
+  auto stream = stub_->BidiStream(&context);
+
   request.set_message(msg + "0");
   EXPECT_TRUE(stream->Write(request));
   EXPECT_TRUE(stream->Read(&response));
@@ -717,11 +913,35 @@ TEST_P(End2endTest, BidiStream) {
   EXPECT_EQ(response.message(), request.message());
 
   request.set_message(msg + "2");
-  EXPECT_TRUE(stream->Write(request));
+  stream->WriteLast(request, WriteOptions());
   EXPECT_TRUE(stream->Read(&response));
   EXPECT_EQ(response.message(), request.message());
 
-  stream->WritesDone();
+  EXPECT_FALSE(stream->Read(&response));
+  EXPECT_FALSE(stream->Read(&response));
+
+  Status s = stream->Finish();
+  EXPECT_TRUE(s.ok());
+}
+
+// This was added to prevent regression from issue:
+// https://github.com/grpc/grpc/issues/11546
+TEST_P(End2endTest, BidiStreamWithEverythingCoalesced) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  context.AddMetadata(kServerFinishAfterNReads, "1");
+  context.set_initial_metadata_corked(true);
+  grpc::string msg("hello");
+
+  auto stream = stub_->BidiStream(&context);
+
+  request.set_message(msg + "0");
+  stream->WriteLast(request, WriteOptions());
+  EXPECT_TRUE(stream->Read(&response));
+  EXPECT_EQ(response.message(), request.message());
+
   EXPECT_FALSE(stream->Read(&response));
   EXPECT_FALSE(stream->Read(&response));
 
@@ -860,6 +1080,7 @@ TEST_P(End2endTest, RpcMaxMessageSize) {
   EchoRequest request;
   EchoResponse response;
   request.set_message(string(kMaxMessageSize_ * 2, 'a'));
+  request.mutable_param()->set_server_die(true);
 
   ClientContext context;
   Status s = stub_->Echo(&context, request, &response);
@@ -916,6 +1137,10 @@ TEST_P(End2endTest, SimultaneousReadWritesDone) {
 }
 
 TEST_P(End2endTest, ChannelState) {
+  if (GetParam().inproc) {
+    return;
+  }
+
   ResetStub();
   // Start IDLE
   EXPECT_EQ(GRPC_CHANNEL_IDLE, channel_->GetState(false));
@@ -924,7 +1149,7 @@ TEST_P(End2endTest, ChannelState) {
   CompletionQueue cq;
   std::chrono::system_clock::time_point deadline =
       std::chrono::system_clock::now() + std::chrono::milliseconds(10);
-  channel_->NotifyOnStateChange(GRPC_CHANNEL_IDLE, deadline, &cq, NULL);
+  channel_->NotifyOnStateChange(GRPC_CHANNEL_IDLE, deadline, &cq, nullptr);
   void* tag;
   bool ok = true;
   cq.Next(&tag, &ok);
@@ -939,7 +1164,8 @@ TEST_P(End2endTest, ChannelState) {
 
 // Takes 10s.
 TEST_P(End2endTest, ChannelStateTimeout) {
-  if (GetParam().credentials_type != kInsecureCredentialsType) {
+  if ((GetParam().credentials_type != kInsecureCredentialsType) ||
+      GetParam().inproc) {
     return;
   }
   int port = grpc_pick_unused_port_or_die();
@@ -962,8 +1188,8 @@ TEST_P(End2endTest, ChannelStateTimeout) {
 // Talking to a non-existing service.
 TEST_P(End2endTest, NonExistingService) {
   ResetChannel();
-  std::unique_ptr<grpc::testing::UnimplementedService::Stub> stub;
-  stub = grpc::testing::UnimplementedService::NewStub(channel_);
+  std::unique_ptr<grpc::testing::UnimplementedEchoService::Stub> stub;
+  stub = grpc::testing::UnimplementedEchoService::NewStub(channel_);
 
   EchoRequest request;
   EchoResponse response;
@@ -1003,6 +1229,46 @@ TEST_P(End2endTest, BinaryTrailerTest) {
   EXPECT_TRUE(returned_info.ParseFromString(ToString(iter->second)));
 }
 
+TEST_P(End2endTest, ExpectErrorTest) {
+  ResetStub();
+
+  std::vector<ErrorStatus> expected_status;
+  expected_status.emplace_back();
+  expected_status.back().set_code(13);  // INTERNAL
+  expected_status.back().set_error_message("text error message");
+  expected_status.back().set_binary_error_details("text error details");
+  expected_status.emplace_back();
+  expected_status.back().set_code(13);  // INTERNAL
+  expected_status.back().set_error_message("text error message");
+  expected_status.back().set_binary_error_details(
+      "\x0\x1\x2\x3\x4\x5\x6\x8\x9\xA\xB");
+
+  for (auto iter = expected_status.begin(); iter != expected_status.end();
+       ++iter) {
+    EchoRequest request;
+    EchoResponse response;
+    ClientContext context;
+    request.set_message("Hello");
+    auto* error = request.mutable_param()->mutable_expected_error();
+    error->set_code(iter->code());
+    error->set_error_message(iter->error_message());
+    error->set_binary_error_details(iter->binary_error_details());
+
+    Status s = stub_->Echo(&context, request, &response);
+    EXPECT_FALSE(s.ok());
+    EXPECT_EQ(iter->code(), s.error_code());
+    EXPECT_EQ(iter->error_message(), s.error_message());
+    EXPECT_EQ(iter->binary_error_details(), s.error_details());
+    EXPECT_TRUE(context.debug_error_string().find("created") !=
+                std::string::npos);
+    EXPECT_TRUE(context.debug_error_string().find("file") != std::string::npos);
+    EXPECT_TRUE(context.debug_error_string().find("line") != std::string::npos);
+    EXPECT_TRUE(context.debug_error_string().find("status") !=
+                std::string::npos);
+    EXPECT_TRUE(context.debug_error_string().find("13") != std::string::npos);
+  }
+}
+
 //////////////////////////////////////////////////////////////////////////
 // Test with and without a proxy.
 class ProxyEnd2endTest : public End2endTest {
@@ -1026,13 +1292,12 @@ TEST_P(ProxyEnd2endTest, SimpleRpcWithEmptyMessages) {
 
 TEST_P(ProxyEnd2endTest, MultipleRpcs) {
   ResetStub();
-  std::vector<std::thread*> threads;
+  std::vector<std::thread> threads;
   for (int i = 0; i < 10; ++i) {
-    threads.push_back(new std::thread(SendRpc, stub_.get(), 10, false));
+    threads.emplace_back(SendRpc, stub_.get(), 10, false);
   }
   for (int i = 0; i < 10; ++i) {
-    threads[i]->join();
-    delete threads[i];
+    threads[i].join();
   }
 }
 
@@ -1043,10 +1308,19 @@ TEST_P(ProxyEnd2endTest, RpcDeadlineExpires) {
   EchoResponse response;
   request.set_message("Hello");
   request.mutable_param()->set_skip_cancelled_check(true);
+  // Let server sleep for 40 ms first to guarantee expiry.
+  // 40 ms might seem a bit extreme but the timer manager would have been just
+  // initialized (when ResetStub() was called) and there are some warmup costs
+  // i.e the timer thread many not have even started. There might also be other
+  // delays in the timer manager thread (in acquiring locks, timer data
+  // structure manipulations, starting backup timer threads) that add to the
+  // delays. 40ms is still not enough in some cases but this significantly
+  // reduces the test flakes
+  request.mutable_param()->set_server_sleep_us(40 * 1000);
 
   ClientContext context;
   std::chrono::system_clock::time_point deadline =
-      std::chrono::system_clock::now() + std::chrono::microseconds(10);
+      std::chrono::system_clock::now() + std::chrono::milliseconds(1);
   context.set_deadline(deadline);
   Status s = stub_->Echo(&context, request, &response);
   EXPECT_EQ(StatusCode::DEADLINE_EXCEEDED, s.error_code());
@@ -1161,12 +1435,19 @@ TEST_P(ProxyEnd2endTest, HugeResponse) {
   request.mutable_param()->set_response_message_length(kResponseSize);
 
   ClientContext context;
+  std::chrono::system_clock::time_point deadline =
+      std::chrono::system_clock::now() + std::chrono::seconds(20);
+  context.set_deadline(deadline);
   Status s = stub_->Echo(&context, request, &response);
   EXPECT_EQ(kResponseSize, response.message().size());
   EXPECT_TRUE(s.ok());
 }
 
 TEST_P(ProxyEnd2endTest, Peer) {
+  // Peer is not meaningful for inproc
+  if (GetParam().inproc) {
+    return;
+  }
   ResetStub();
   EchoRequest request;
   EchoResponse response;
@@ -1260,6 +1541,7 @@ TEST_P(SecureEnd2endTest, BlockingAuthMetadataPluginAndProcessorFailure) {
   EXPECT_FALSE(s.ok());
   EXPECT_EQ(s.error_code(), StatusCode::UNAUTHENTICATED);
 }
+
 TEST_P(SecureEnd2endTest, SetPerCallCredentials) {
   ResetStub();
   EchoRequest request;
@@ -1313,6 +1595,40 @@ TEST_P(SecureEnd2endTest, OverridePerCallCredentials) {
   EXPECT_TRUE(s.ok());
 }
 
+TEST_P(SecureEnd2endTest, AuthMetadataPluginKeyFailure) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  context.set_credentials(
+      MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
+          new TestMetadataCredentialsPlugin(
+              TestMetadataCredentialsPlugin::kBadMetadataKey,
+              "Does not matter, will fail the key is invalid.", false, true))));
+  request.set_message("Hello");
+
+  Status s = stub_->Echo(&context, request, &response);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.error_code(), StatusCode::UNAUTHENTICATED);
+}
+
+TEST_P(SecureEnd2endTest, AuthMetadataPluginValueFailure) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  context.set_credentials(
+      MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
+          new TestMetadataCredentialsPlugin(
+              TestMetadataCredentialsPlugin::kGoodMetadataKey,
+              "With illegal \n value.", false, true))));
+  request.set_message("Hello");
+
+  Status s = stub_->Echo(&context, request, &response);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.error_code(), StatusCode::UNAUTHENTICATED);
+}
+
 TEST_P(SecureEnd2endTest, NonBlockingAuthMetadataPluginFailure) {
   ResetStub();
   EchoRequest request;
@@ -1321,6 +1637,7 @@ TEST_P(SecureEnd2endTest, NonBlockingAuthMetadataPluginFailure) {
   context.set_credentials(
       MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
           new TestMetadataCredentialsPlugin(
+              TestMetadataCredentialsPlugin::kGoodMetadataKey,
               "Does not matter, will fail anyway (see 3rd param)", false,
               false))));
   request.set_message("Hello");
@@ -1328,6 +1645,9 @@ TEST_P(SecureEnd2endTest, NonBlockingAuthMetadataPluginFailure) {
   Status s = stub_->Echo(&context, request, &response);
   EXPECT_FALSE(s.ok());
   EXPECT_EQ(s.error_code(), StatusCode::UNAUTHENTICATED);
+  EXPECT_EQ(s.error_message(),
+            grpc::string("Getting metadata from plugin failed with error: ") +
+                kTestCredsPluginErrorMsg);
 }
 
 TEST_P(SecureEnd2endTest, NonBlockingAuthMetadataPluginAndProcessorSuccess) {
@@ -1378,6 +1698,7 @@ TEST_P(SecureEnd2endTest, BlockingAuthMetadataPluginFailure) {
   context.set_credentials(
       MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
           new TestMetadataCredentialsPlugin(
+              TestMetadataCredentialsPlugin::kGoodMetadataKey,
               "Does not matter, will fail anyway (see 3rd param)", true,
               false))));
   request.set_message("Hello");
@@ -1385,6 +1706,37 @@ TEST_P(SecureEnd2endTest, BlockingAuthMetadataPluginFailure) {
   Status s = stub_->Echo(&context, request, &response);
   EXPECT_FALSE(s.ok());
   EXPECT_EQ(s.error_code(), StatusCode::UNAUTHENTICATED);
+  EXPECT_EQ(s.error_message(),
+            grpc::string("Getting metadata from plugin failed with error: ") +
+                kTestCredsPluginErrorMsg);
+}
+
+TEST_P(SecureEnd2endTest, CompositeCallCreds) {
+  ResetStub();
+  EchoRequest request;
+  EchoResponse response;
+  ClientContext context;
+  const char kMetadataKey1[] = "call-creds-key1";
+  const char kMetadataKey2[] = "call-creds-key2";
+  const char kMetadataVal1[] = "call-creds-val1";
+  const char kMetadataVal2[] = "call-creds-val2";
+
+  context.set_credentials(CompositeCallCredentials(
+      MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
+          new TestMetadataCredentialsPlugin(kMetadataKey1, kMetadataVal1, true,
+                                            true))),
+      MetadataCredentialsFromPlugin(std::unique_ptr<MetadataCredentialsPlugin>(
+          new TestMetadataCredentialsPlugin(kMetadataKey2, kMetadataVal2, true,
+                                            true)))));
+  request.set_message("Hello");
+  request.mutable_param()->set_echo_metadata(true);
+
+  Status s = stub_->Echo(&context, request, &response);
+  EXPECT_TRUE(s.ok());
+  EXPECT_TRUE(MetadataContains(context.GetServerTrailingMetadata(),
+                               kMetadataKey1, kMetadataVal1));
+  EXPECT_TRUE(MetadataContains(context.GetServerTrailingMetadata(),
+                               kMetadataKey2, kMetadataVal2));
 }
 
 TEST_P(SecureEnd2endTest, ClientAuthContext) {
@@ -1404,7 +1756,7 @@ TEST_P(SecureEnd2endTest, ClientAuthContext) {
   std::shared_ptr<const AuthContext> auth_ctx = context.auth_context();
   std::vector<grpc::string_ref> tst =
       auth_ctx->FindPropertyValues("transport_security_type");
-  EXPECT_EQ(1u, tst.size());
+  ASSERT_EQ(1u, tst.size());
   EXPECT_EQ(GetParam().credentials_type, ToString(tst[0]));
   if (GetParam().credentials_type == kTlsCredentialsType) {
     EXPECT_EQ("x509_subject_alternative_name",
@@ -1418,42 +1770,83 @@ TEST_P(SecureEnd2endTest, ClientAuthContext) {
   }
 }
 
+class ResourceQuotaEnd2endTest : public End2endTest {
+ public:
+  ResourceQuotaEnd2endTest()
+      : server_resource_quota_("server_resource_quota") {}
+
+  virtual void ConfigureServerBuilder(ServerBuilder* builder) override {
+    builder->SetResourceQuota(server_resource_quota_);
+  }
+
+ private:
+  ResourceQuota server_resource_quota_;
+};
+
+TEST_P(ResourceQuotaEnd2endTest, SimpleRequest) {
+  ResetStub();
+
+  EchoRequest request;
+  EchoResponse response;
+  request.set_message("Hello");
+
+  ClientContext context;
+  Status s = stub_->Echo(&context, request, &response);
+  EXPECT_EQ(response.message(), request.message());
+  EXPECT_TRUE(s.ok());
+}
+
 std::vector<TestScenario> CreateTestScenarios(bool use_proxy,
                                               bool test_insecure,
-                                              bool test_secure) {
+                                              bool test_secure,
+                                              bool test_inproc) {
   std::vector<TestScenario> scenarios;
   std::vector<grpc::string> credentials_types;
   if (test_secure) {
-    credentials_types = GetSecureCredentialsTypeList();
+    credentials_types =
+        GetCredentialsProvider()->GetSecureCredentialsTypeList();
   }
-  if (test_insecure) {
+  auto insec_ok = [] {
+    // Only allow insecure credentials type when it is registered with the
+    // provider. User may create providers that do not have insecure.
+    return GetCredentialsProvider()->GetChannelCredentials(
+               kInsecureCredentialsType, nullptr) != nullptr;
+  };
+  if (test_insecure && insec_ok()) {
     credentials_types.push_back(kInsecureCredentialsType);
   }
-  for (auto it = credentials_types.begin(); it != credentials_types.end();
-       ++it) {
-    scenarios.push_back(TestScenario(false, *it));
+  GPR_ASSERT(!credentials_types.empty());
+  for (const auto& cred : credentials_types) {
+    scenarios.emplace_back(false, false, cred);
     if (use_proxy) {
-      scenarios.push_back(TestScenario(true, *it));
+      scenarios.emplace_back(true, false, cred);
     }
+  }
+  if (test_inproc && insec_ok()) {
+    scenarios.emplace_back(false, true, kInsecureCredentialsType);
   }
   return scenarios;
 }
 
 INSTANTIATE_TEST_CASE_P(End2end, End2endTest,
                         ::testing::ValuesIn(CreateTestScenarios(false, true,
-                                                                true)));
+                                                                true, true)));
 
 INSTANTIATE_TEST_CASE_P(End2endServerTryCancel, End2endServerTryCancelTest,
                         ::testing::ValuesIn(CreateTestScenarios(false, true,
-                                                                false)));
+                                                                true, true)));
 
 INSTANTIATE_TEST_CASE_P(ProxyEnd2end, ProxyEnd2endTest,
                         ::testing::ValuesIn(CreateTestScenarios(true, true,
-                                                                true)));
+                                                                true, true)));
 
 INSTANTIATE_TEST_CASE_P(SecureEnd2end, SecureEnd2endTest,
                         ::testing::ValuesIn(CreateTestScenarios(false, false,
-                                                                true)));
+                                                                true, false)));
+
+INSTANTIATE_TEST_CASE_P(ResourceQuotaEnd2end, ResourceQuotaEnd2endTest,
+                        ::testing::ValuesIn(CreateTestScenarios(false, true,
+                                                                true, true)));
 
 }  // namespace
 }  // namespace testing
